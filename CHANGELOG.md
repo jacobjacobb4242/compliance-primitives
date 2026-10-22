@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **allowlist-token**: `pause` now blocks `add_to_allowlist`,
+  `add_to_allowlist_delegated`, and `remove_from_allowlist`, matching the
+  doc comment "Pause all mutating operations". Previously only `transfer`
+  checked the pause flag, so a compromised key could keep mutating the
+  allowlist while the contract appeared paused. Admin rotation
+  (`propose_admin` / `accept_admin` / `transfer_admin`) and `unpause`
+  remain available while paused so an operator can always recover
+  (fixes #583, matching the behaviour of `denylist-gate`).
+
 ### Added
 
 - **compliance-aggregator**: Admin-gated `upgrade(admin, new_wasm_hash)`

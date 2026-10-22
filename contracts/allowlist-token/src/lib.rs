@@ -209,7 +209,10 @@ impl AllowlistToken {
     /// it is restricted to the `admin` (directly, or through
     /// `add_to_allowlist_delegated`). The compliance officer may revoke access
     /// via `remove_from_allowlist` but never grant it.
+    ///
+    /// Returns `Err(ContractPaused)` if the contract is currently paused.
     pub fn add_to_allowlist(env: Env, admin: Address, address: Address) -> Result<(), Error> {
+        Self::reject_if_paused(&env)?;
         Self::require_admin(&env, &admin)?;
         if let Some(exp) = expiration_ledger {
             if exp < env.ledger().sequence() {
@@ -232,6 +235,8 @@ impl AllowlistToken {
     /// Add `address` to the allowlist using a signed off-chain authorization
     /// payload. This path verifies a nonce and expiry before applying the
     /// allowlist change, so a relayer can submit it on behalf of the admin.
+    ///
+    /// Returns `Err(ContractPaused)` if the contract is currently paused.
     pub fn add_to_allowlist_delegated(
         env: Env,
         admin: Address,
@@ -240,6 +245,7 @@ impl AllowlistToken {
         expiry: u64,
         signature: BytesN<64>,
     ) -> Result<(), Error> {
+        Self::reject_if_paused(&env)?;
         Self::require_configured_admin(&env, &admin)?;
 
         let now = env.ledger().timestamp();
@@ -288,7 +294,10 @@ impl AllowlistToken {
     }
 
     /// Remove `address` from the allowlist. Admin or compliance officer.
+    ///
+    /// Returns `Err(ContractPaused)` if the contract is currently paused.
     pub fn remove_from_allowlist(env: Env, admin: Address, address: Address) -> Result<(), Error> {
+        Self::reject_if_paused(&env)?;
         Self::require_compliance_authority(&env, &admin)?;
         env.storage()
             .persistent()
@@ -491,6 +500,19 @@ impl AllowlistToken {
     }
 
     /// Pause all mutating operations. Admin-only.
+    ///
+    /// While paused:
+    /// - `transfer` returns `Err(ContractPaused)`.
+    /// - `add_to_allowlist`, `add_to_allowlist_delegated`, and
+    ///   `remove_from_allowlist` return `Err(ContractPaused)`.
+    ///
+    /// The following are deliberately **not** blocked by pause so that an
+    /// operator can always recover from an incident:
+    /// - `unpause` — to resume normal operation.
+    /// - `propose_admin` / `accept_admin` / `transfer_admin` — to rotate a
+    ///   compromised key.
+    /// - `set_compliance_officer` / `revoke_compliance_officer`.
+    /// - Read-only functions (`is_allowed`, `is_paused`, `metadata`, …).
     pub fn pause(env: Env, admin: Address) -> Result<(), Error> {
         Self::require_admin(&env, &admin)?;
         env.storage().instance().set(&DataKey::Paused, &true);
@@ -594,6 +616,18 @@ impl AllowlistToken {
             }
         }
         Err(Error::NotAuthorized)
+    }
+
+    fn reject_if_paused(env: &Env) -> Result<(), Error> {
+        if env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+        {
+            return Err(Error::ContractPaused);
+        }
+        Ok(())
     }
 
     /// Message signed by the delegated admin key:

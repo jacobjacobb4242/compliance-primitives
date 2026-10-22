@@ -730,20 +730,66 @@ fn test_transfer_blocked_while_paused_and_succeeds_after_unpause() {
     assert_eq!(token.last_transfer(), Some((alice, bob, 10)));
 }
 
+/// Pause blocks add/remove so a paused contract's allowlist stays frozen.
+/// Admin rotation and unpause remain available (regression test for #583).
 #[test]
-fn test_pause_does_not_block_allowlist_mutations() {
+fn test_pause_blocks_add_to_allowlist() {
     let env = Env::default();
     let (admin, _token_id, _contract_id, client) = setup(&env);
-    let alice = Address::generate(&env);
     let bob = Address::generate(&env);
-    client.add_to_allowlist(&admin, &alice);
 
     client.pause(&admin);
 
-    client.add_to_allowlist(&admin, &bob);
+    assert_eq!(
+        client.try_add_to_allowlist(&admin, &bob, &None),
+        Err(Ok(Error::ContractPaused))
+    );
+    assert!(!client.is_allowed(&bob));
+}
+
+#[test]
+fn test_pause_blocks_remove_from_allowlist() {
+    let env = Env::default();
+    let (admin, _token_id, _contract_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+    client.add_to_allowlist(&admin, &alice, &None);
+
+    client.pause(&admin);
+
+    assert_eq!(
+        client.try_remove_from_allowlist(&admin, &alice),
+        Err(Ok(Error::ContractPaused))
+    );
+    // Entry must still be there — the allowlist must stay frozen.
+    assert!(client.is_allowed(&alice));
+}
+
+#[test]
+fn test_unpause_restores_allowlist_mutations() {
+    let env = Env::default();
+    let (admin, _token_id, _contract_id, client) = setup(&env);
+    let bob = Address::generate(&env);
+
+    client.pause(&admin);
+    client.unpause(&admin);
+
+    // After unpause, mutations work again.
+    client.add_to_allowlist(&admin, &bob, &None);
     assert!(client.is_allowed(&bob));
-    client.remove_from_allowlist(&admin, &alice);
-    assert!(!client.is_allowed(&alice));
+}
+
+#[test]
+fn test_admin_rotation_works_while_paused() {
+    let env = Env::default();
+    let (admin, _token_id, _contract_id, client) = setup(&env);
+    let new_admin = Address::generate(&env);
+
+    client.pause(&admin);
+    // propose_admin / accept_admin must succeed while paused so a compromised
+    // key can always be rotated out.
+    client.propose_admin(&admin, &new_admin);
+    client.accept_admin(&new_admin);
+    assert_eq!(client.get_admin(), new_admin);
 }
 
 #[test]
