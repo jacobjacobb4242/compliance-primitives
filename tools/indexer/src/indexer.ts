@@ -74,6 +74,7 @@ export class Indexer {
       this.config.aggregatorContractId,
       this.config.policyEngineContractId,
       this.config.circuitBreakerContractId,
+      this.config.auditLogContractId,
     ].filter(Boolean);
 
     if (contractIds.length === 0) {
