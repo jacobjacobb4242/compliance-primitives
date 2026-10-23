@@ -2,8 +2,8 @@
 
 This document states this project's semver/compatibility commitments around
 on-chain storage layout as contracts gain upgrade support. Soroban's
-`update_current_contract_wasm` (used by [`jurisdiction-flag`'s `upgrade()`
-function](./contracts/jurisdiction-flag/UPGRADE.md), and by any primitive
+`update_current_contract_wasm` (used by [`jurisdiction-flag`'s timelocked
+upgrade functions](./contracts/jurisdiction-flag/UPGRADE.md), and by any primitive
 that adds upgrade support after it) swaps contract *code* in place but never
 touches contract *storage*. That means the new code must still be able to
 make sense of whatever the old code already wrote — storage layout

@@ -24,16 +24,18 @@ The following contracts expose an upgrade path:
 - `allowlist-token` and `denylist-gate`: the admin must propose an upgrade,
   then wait until its configured ledger delay has elapsed before committing
   it. A pending upgrade can be cancelled by the admin during the delay.
-- `jurisdiction-flag`: the issuer can replace the contract Wasm immediately
-  with `upgrade()`; no delay or cancellation window is built into this path.
+- `jurisdiction-flag`: the issuer must call `propose_upgrade`, wait at least
+  17,280 ledgers (~1 day), then call `commit_upgrade`. The issuer can cancel a
+  pending proposal during the delay.
 
 Soroban keeps the contract ID and its instance and persistent storage when
 the Wasm is replaced. This includes the admin or issuer and compliance state
 stored under compatible keys. An upgrade does not migrate, reinterpret, or
 repair storage: the new code must remain compatible with existing key and
 value types, or provide and invoke an explicit migration. In
-`allowlist-token` and `denylist-gate`, the pending-upgrade record is removed
-when an upgrade is committed; it is not carried forward as a pending action.
+`allowlist-token`, `denylist-gate`, and `jurisdiction-flag`, the
+pending-upgrade record is removed when an upgrade is committed; it is not
+carried forward as a pending action.
 The previous Wasm is not retained as an automatic rollback target, and a
 failed migration or incompatible schema requires a separately deployed
 corrective upgrade.

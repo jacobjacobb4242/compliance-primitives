@@ -860,6 +860,55 @@ fn test_propose_issuer_requires_current_issuer_auth() {
 }
 
 #[test]
+fn test_upgrade_delay_minimum_boundary() {
+    let env = Env::default();
+    let (issuer, contract_id, client) = setup(&env);
+    let wasm_hash = BytesN::from_array(&env, &[1; 32]);
+    let current_sequence = env.ledger().sequence();
+
+    assert_eq!(
+        client.try_propose_upgrade(
+            &issuer,
+            &wasm_hash,
+            &(MIN_UPGRADE_DELAY_LEDGERS - 1),
+        ),
+        Err(Ok(Error::UpgradeDelayTooShort))
+    );
+    assert_eq!(client.try_commit_upgrade(&issuer), Err(Ok(Error::UpgradeNotReady)));
+
+    client.propose_upgrade(&issuer, &wasm_hash, &MIN_UPGRADE_DELAY_LEDGERS);
+    let pending: UpgradeState = env.as_contract(&contract_id, || {
+        env.storage()
+            .instance()
+            .get(&DataKey::PendingUpgrade)
+            .unwrap()
+    });
+    assert_eq!(
+        pending.activated_at,
+        u64::from(current_sequence) + u64::from(MIN_UPGRADE_DELAY_LEDGERS)
+    );
+    assert_eq!(client.try_commit_upgrade(&issuer), Err(Ok(Error::UpgradeNotReady)));
+}
+
+#[test]
+fn test_upgrade_timelock_requires_issuer_and_can_be_cancelled() {
+    let env = Env::default();
+    let (issuer, _contract_id, client) = setup(&env);
+    let impostor = Address::generate(&env);
+    let wasm_hash = BytesN::from_array(&env, &[1; 32]);
+
+    assert_eq!(
+        client.try_propose_upgrade(&impostor, &wasm_hash, &MIN_UPGRADE_DELAY_LEDGERS),
+        Err(Ok(Error::NotAuthorized))
+    );
+    assert_eq!(client.try_cancel_upgrade(&impostor), Err(Ok(Error::NotAuthorized)));
+
+    client.propose_upgrade(&issuer, &wasm_hash, &MIN_UPGRADE_DELAY_LEDGERS);
+    client.cancel_upgrade(&issuer);
+    assert_eq!(client.try_commit_upgrade(&issuer), Err(Ok(Error::UpgradeNotReady)));
+}
+
+#[test]
 fn test_transfer_issuer_emergency_rotation_clears_pending_proposal() {
     let env = Env::default();
     let (issuer, _contract_id, client) = setup(&env);

@@ -21,8 +21,9 @@
 //! `allowed_codes` entry of `"US"`.
 //!
 //! **Callers**: the configured issuer or compliance officer may call
-//! `set_jurisdiction` and `add_jurisdiction`; only the issuer may call
-//! `remove_jurisdiction`, `remove_jurisdiction_multiple`, or `upgrade`.
+//! `set_jurisdiction`, `set_jurisdiction_until`, `add_jurisdiction`, and
+//! `set_multiple_jurisdictions`; only the issuer may call removal, pause, and
+//! timelocked upgrade operations.
 //! `set_jurisdiction` / `get_jurisdiction` remain single-code conveniences.
 //! Use `add_jurisdiction`, `remove_jurisdiction`, and `list_jurisdictions`
 //! for the multi-code model. Any contract or off-chain client can read codes
@@ -47,6 +48,9 @@ const TTL_EXTEND_TO: u32 = 5_000;
 /// exhaustion.
 pub const MAX_BATCH_SIZE: u32 = 100;
 
+/// Minimum delay for a WASM upgrade proposal (~1 day at 5 seconds per ledger).
+pub const MIN_UPGRADE_DELAY_LEDGERS: u32 = 17_280;
+
 #[contracttype]
 #[derive(Clone)]
 enum DataKey {
@@ -61,6 +65,8 @@ enum DataKey {
     Paused,
     /// Pending issuer address proposed via `propose_issuer`. Instance storage.
     PendingIssuer,
+    /// Pending issuer-authorized WASM upgrade proposal. Instance storage.
+    PendingUpgrade,
 }
 
 /// Emitted whenever a jurisdiction flag is set.
@@ -121,6 +127,14 @@ pub struct Unpaused {
     pub issuer: Address,
 }
 
+/// Delayed issuer upgrade proposal.
+#[contracttype]
+#[derive(Clone)]
+pub struct UpgradeState {
+    pub new_wasm: BytesN<32>,
+    pub activated_at: u64,
+}
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -142,6 +156,10 @@ pub enum Error {
     /// The address calling `accept_issuer` does not match the pending issuer
     /// stored by `propose_issuer`.
     PendingIssuerMismatch = 9,
+    /// Upgrade delay is shorter than [`MIN_UPGRADE_DELAY_LEDGERS`].
+    UpgradeDelayTooShort = 10,
+    /// No upgrade is pending, or its timelock has not elapsed.
+    UpgradeNotReady = 11,
 }
 
 #[contract]
@@ -565,15 +583,56 @@ impl JurisdictionFlag {
     // Private helpers
     // -----------------------------------------------------------------------
 
-    /// Upgrade the contract WASM. Issuer-only.
-    ///
-    /// Uses Soroban's native `update_current_contract_wasm` host function to
-    /// swap the contract code behind the same contract ID. All existing
-    /// storage (issuer address, jurisdiction flags) is preserved across the
-    /// upgrade. The issuer's auth is verified before the upgrade proceeds.
-    pub fn upgrade(env: Env, issuer: Address, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
+    /// Propose a WASM upgrade that can be committed after the minimum delay.
+    /// Issuer-only. `new_wasm_hash` must identify previously uploaded contract
+    /// Wasm, and `delay_ledgers` must be at least
+    /// [`MIN_UPGRADE_DELAY_LEDGERS`]. A new proposal replaces any existing one.
+    pub fn propose_upgrade(
+        env: Env,
+        issuer: Address,
+        new_wasm_hash: BytesN<32>,
+        delay_ledgers: u32,
+    ) -> Result<(), Error> {
         Self::require_issuer(&env, &issuer)?;
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        if delay_ledgers < MIN_UPGRADE_DELAY_LEDGERS {
+            return Err(Error::UpgradeDelayTooShort);
+        }
+        let state = UpgradeState {
+            new_wasm: new_wasm_hash,
+            activated_at: u64::from(env.ledger().sequence())
+                .saturating_add(u64::from(delay_ledgers)),
+        };
+        env.storage().instance().set(&DataKey::PendingUpgrade, &state);
+        env.events().publish(
+            (soroban_sdk::symbol_short!("upgprop"),),
+            (issuer, delay_ledgers),
+        );
+        Ok(())
+    }
+
+    /// Commit a previously proposed upgrade once its delay has elapsed.
+    /// Issuer-only.
+    pub fn commit_upgrade(env: Env, issuer: Address) -> Result<(), Error> {
+        Self::require_issuer(&env, &issuer)?;
+        let state: UpgradeState = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgrade)
+            .ok_or(Error::UpgradeNotReady)?;
+        if u64::from(env.ledger().sequence()) < state.activated_at {
+            return Err(Error::UpgradeNotReady);
+        }
+        env.deployer().update_current_contract_wasm(state.new_wasm);
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+        env.events()
+            .publish((soroban_sdk::symbol_short!("upgcommit"),), (issuer,));
+        Ok(())
+    }
+
+    /// Cancel a pending upgrade proposal. Issuer-only.
+    pub fn cancel_upgrade(env: Env, issuer: Address) -> Result<(), Error> {
+        Self::require_issuer(&env, &issuer)?;
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
         Ok(())
     }
 

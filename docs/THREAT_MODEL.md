@@ -13,7 +13,7 @@
 |----------|------|
 | `allowlist-token` | Wraps an underlying asset and gates `transfer` so only allowlisted addresses may send/receive. Admin-managed allowlist, pausable, two-step admin transfer. |
 | `denylist-gate` | Maintains a denylist; `check(address)` is consulted before sensitive operations. Admin-managed, with an optional multisig signer set and a compliance-officer role. |
-| `jurisdiction-flag` | Maps addresses → jurisdiction codes (with optional expiry). `is_permitted_jurisdiction` is the read gate. Issuer-managed, with a compliance-officer role and an `upgrade` entry point. |
+| `jurisdiction-flag` | Maps addresses → jurisdiction codes (with optional expiry). `is_permitted_jurisdiction` is the read gate. Issuer-managed, with a compliance-officer role and timelocked upgrade entry points. |
 
 ## Rating scale
 
@@ -98,7 +98,7 @@ non-admin write path → storage-fill griefing not applicable.
   `remove_jurisdiction_multiple`) and holds the sole `upgrade` key.
 - `compliance_officer` role can also set/revoke flags.
 - `is_permitted_jurisdiction` is the read gate.
-- **`upgrade(env, issuer, new_wasm)` already exists** — relevant to #113.
+- Upgrades use issuer-only `propose_upgrade` / `commit_upgrade` / `cancel_upgrade` entry points with a minimum 17,280-ledger delay (~1 day).
 
 ### 3.1 Griefing
 | ID | Scenario | Sev | Lik | Mitigation |
@@ -118,8 +118,8 @@ No non-admin write path → storage-fill griefing not applicable.
 ### 3.3 Admin-key compromise
 | ID | Scenario | Sev | Lik | Mitigation |
 |----|----------|-----|-----|------------|
-| J5 | Compromised `issuer` rewrites jurisdiction flags to bypass jurisdiction rules. | High | Low | Recovery via `compliance_officer` + (pending) pause/#84/#85. Note: **`upgrade` is issuer-only with no multisig/timelock**, so a compromised `issuer` can also deploy arbitrary `new_wasm` — see J6. |
-| J6 | **Compromised `issuer` calls `upgrade` with malicious `new_wasm`** → total contract takeover / fund theft in integrators. | Critical | Low | **No current mitigation.** This is exactly why #113 (upgradeability pattern / migration path) matters: a safe upgrade must be (a) two-step (propose + delay + accept), (b) timelocked so a watchguard can pause, and (c) ideally gated by `multisig-admin`. Until #113 lands, `upgrade` is a single-point-of-catastrophe key. |
+| J5 | Compromised `issuer` rewrites jurisdiction flags to bypass jurisdiction rules. | High | Low | Recovery via `compliance_officer` + (pending) pause/#84/#85. A compromised issuer can still propose malicious Wasm; J6 now has an enforced review delay. |
+| J6 | **Compromised `issuer` proposes malicious `new_wasm`** → total contract takeover / fund theft in integrators if the proposal is committed. | Critical | Low | **Mitigated, not eliminated:** `propose_upgrade` enforces a minimum 17,280-ledger (~1 day) delay before `commit_upgrade`, and the issuer can cancel a pending proposal. This creates a detection and response window, but a compromised issuer can still commit if nobody cancels; independent watchguard or multisig cancellation is not implemented. |
 
 ---
 
@@ -135,8 +135,9 @@ No non-admin write path → storage-fill griefing not applicable.
 3. **Pause (#84/#85) and two-step admin (#74/#75/#76)** are the primary
    blast-radius limiters for admin compromise; several scenarios above assume
    they have landed. Track their merge before relying on A6/A7/D5/J5 mitigations.
-4. **`jurisdiction-flag::upgrade` is the most dangerous single key** (J6). #113
-   should introduce a delayed, reviewable upgrade before mainnet use.
+4. **`jurisdiction-flag` upgrades have an enforced one-day minimum review
+  window** (J6). Keep issuer monitoring and cancellation procedures available;
+  the delay does not by itself prevent a compromised issuer from upgrading.
 
 ## Open questions / follow-ups
 - Should `check` / `is_permitted_jurisdiction` be made callable only as an

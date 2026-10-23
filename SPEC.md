@@ -286,20 +286,18 @@ Returns `true` only if the address has a code AND it matches at least one in `al
 - `contracts/jurisdiction-flag/src/test.rs:test_is_permitted_jurisdiction_false_with_empty_allowed_list` — empty allowed list, returns `false`
 
 #### Invariant 3.3.4: Upgrade Preserves Storage
-**Statement**: After calling `upgrade(issuer, new_wasm)`, all previously set jurisdictions must remain intact.
+**Statement**: A committed timelocked upgrade preserves existing jurisdiction storage.
 
-**Proof**: The `upgrade()` function (line 98-104) calls `env.deployer().update_current_contract_wasm()` and does NOT modify any storage. Soroban's storage model preserves persistent data across code updates.
+**Proof**: `commit_upgrade()` uses `env.deployer().update_current_contract_wasm()` without modifying jurisdiction keys. Soroban preserves storage across code updates, and `PendingUpgrade` is an appended storage key.
 
-**Tests verifying this invariant**:
-- `contracts/jurisdiction-flag/src/test.rs:test_upgrade_preserves_jurisdiction_storage` — sets jurisdiction, upgrades, verifies it's still there
+#### Invariant 3.3.5: Upgrade Requires Issuer and Delay
+**Statement**: Only the issuer can propose, commit, or cancel an upgrade, and a proposal cannot be committed before its activation sequence.
 
-#### Invariant 3.3.5: Only Issuer Can Upgrade
-**Statement**: Only the issuer can call `upgrade()`.
-
-**Proof**: Line 102 calls `Self::require_issuer()`, enforcing issuer authentication.
+**Proof**: Each upgrade entry point calls `Self::require_issuer()`. `propose_upgrade()` rejects delays below `MIN_UPGRADE_DELAY_LEDGERS` (17,280); `commit_upgrade()` checks the stored activation sequence.
 
 **Tests verifying this invariant**:
-- `contracts/jurisdiction-flag/src/test.rs:test_upgrade_requires_issuer_auth` — non-issuer calls `upgrade()`, expects `Error::NotAuthorized`
+- `contracts/jurisdiction-flag/src/test.rs:test_upgrade_delay_minimum_boundary` — checks minimum-delay rejection/acceptance and early-commit rejection
+- `contracts/jurisdiction-flag/src/test.rs:test_upgrade_timelock_requires_issuer_and_can_be_cancelled` — checks issuer authorization and cancellation
 
 #### Invariant 3.3.6: All Jurisdiction Changes Emit Events
 **Statement**: Every call to `set_jurisdiction()` must emit a `JurisdictionSet` event.
@@ -1021,7 +1019,7 @@ isolation) needs to verify hold end to end.
 
 4. **Concurrent/replay attack tests** — No tests for transaction replay or concurrent modifications. Soroban SDK handles nonce validation, but explicit tests would strengthen confidence.
 
-5. **Upgrade event emission test** (Jurisdiction-flag) — `test_upgrade_emits_event` should verify the `UpgradePerformed` event is actually emitted.
+5. **Upgrade event emission test** (Jurisdiction-flag) — add explicit coverage for the `upgprop` and `upgcommit` upgrade events.
 
 6. **`audit-log`: `record()` before `initialize()`** (Invariant 4.3.1) — No explicit test that `record()` fails with `Error::NotInitialized` when called before `initialize()`.
 
