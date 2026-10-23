@@ -47,6 +47,18 @@ const TTL_EXTEND_TO: u32 = 5_000;
 /// exhaustion.
 pub const MAX_BATCH_SIZE: u32 = 100;
 
+/// Maximum number of jurisdiction codes that can be attached to a single
+/// address. Enforced in `add_jurisdiction` to prevent a compromised or buggy
+/// officer key from attaching so many codes that every later
+/// `is_permitted_jurisdiction` call (which does `allowed_codes × codes`
+/// comparisons) exceeds the CPU budget inside a consumer's transfer.
+///
+/// The value 8 is chosen to be well within the Soroban per-invocation CPU
+/// budget for all realistic `allowed_codes` list sizes, while covering any
+/// legitimate multi-jurisdiction use case (an address is rarely subject to
+/// more than a handful of applicable codes).
+pub const MAX_CODES_PER_ADDRESS: u32 = 8;
+
 #[contracttype]
 #[derive(Clone)]
 enum DataKey {
@@ -142,6 +154,9 @@ pub enum Error {
     /// The address calling `accept_issuer` does not match the pending issuer
     /// stored by `propose_issuer`.
     PendingIssuerMismatch = 9,
+    /// `add_jurisdiction` was called when the address already has
+    /// [`MAX_CODES_PER_ADDRESS`] codes attached.
+    TooManyCodes = 10,
 }
 
 #[contract]
@@ -440,6 +455,11 @@ impl JurisdictionFlag {
 
     /// Add `code` to `address`'s jurisdiction codes if it is not already present.
     /// Issuer or compliance-officer only.
+    ///
+    /// # Errors
+    /// - [`Error::TooManyCodes`] if the address already has
+    ///   [`MAX_CODES_PER_ADDRESS`] codes attached. Remove a code first, or use
+    ///   [`set_jurisdiction`](Self::set_jurisdiction) to replace all codes at once.
     pub fn add_jurisdiction(
         env: Env,
         issuer: Address,
@@ -451,6 +471,9 @@ impl JurisdictionFlag {
 
         let mut codes = Self::load_jurisdictions(&env, &address);
         if !codes.iter().any(|existing| existing == code) {
+            if codes.len() >= MAX_CODES_PER_ADDRESS {
+                return Err(Error::TooManyCodes);
+            }
             codes.push_back(code.clone());
             Self::store_jurisdictions(&env, &address, &codes);
         }

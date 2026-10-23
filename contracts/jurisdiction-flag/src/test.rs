@@ -908,3 +908,67 @@ fn test_propose_issuer_overwrites_previous_proposal() {
         Some(String::from_str(&env, "DE"))
     );
 }
+
+// ---------------------------------------------------------------------------
+// Issue #597: MAX_CODES_PER_ADDRESS cap on add_jurisdiction
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_add_jurisdiction_enforces_max_codes_per_address() {
+    let env = Env::default();
+    let (issuer, _contract_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+
+    // Fill up to the cap with distinct two-letter codes.
+    // There are 26 uppercase letters; generate MAX_CODES_PER_ADDRESS codes.
+    let all_codes = ["AA", "BB", "CC", "DD", "EE", "FF", "GG", "HH"];
+    assert_eq!(all_codes.len() as u32, super::MAX_CODES_PER_ADDRESS);
+
+    for code in all_codes.iter().take(super::MAX_CODES_PER_ADDRESS as usize - 1) {
+        client.add_jurisdiction(&issuer, &alice, &String::from_str(&env, code));
+    }
+    // The cap-th addition should succeed.
+    client.add_jurisdiction(
+        &issuer,
+        &alice,
+        &String::from_str(&env, all_codes[super::MAX_CODES_PER_ADDRESS as usize - 1]),
+    );
+    // One more must be rejected.
+    let result = client.try_add_jurisdiction(&issuer, &alice, &String::from_str(&env, "ZZ"));
+    assert_eq!(result, Err(Ok(Error::TooManyCodes)));
+}
+
+#[test]
+fn test_add_jurisdiction_duplicate_does_not_count_toward_cap() {
+    let env = Env::default();
+    let (issuer, _contract_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+
+    // Add a code, then add it again — the duplicate should not increase the count.
+    client.add_jurisdiction(&issuer, &alice, &String::from_str(&env, "US"));
+    client.add_jurisdiction(&issuer, &alice, &String::from_str(&env, "US"));
+
+    // Should have exactly one code.
+    assert_eq!(
+        client.list_jurisdictions(&alice),
+        vec![&env, String::from_str(&env, "US")]
+    );
+}
+
+#[test]
+fn test_add_jurisdiction_at_boundary_accepts_up_to_cap() {
+    let env = Env::default();
+    let (issuer, _contract_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+
+    let all_codes = ["AA", "BB", "CC", "DD", "EE", "FF", "GG", "HH"];
+    for code in all_codes.iter().take(super::MAX_CODES_PER_ADDRESS as usize) {
+        client.add_jurisdiction(&issuer, &alice, &String::from_str(&env, code));
+    }
+
+    // Exactly MAX_CODES_PER_ADDRESS codes stored.
+    assert_eq!(
+        client.list_jurisdictions(&alice).len(),
+        super::MAX_CODES_PER_ADDRESS
+    );
+}
