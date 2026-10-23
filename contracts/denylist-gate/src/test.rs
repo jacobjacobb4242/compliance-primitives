@@ -637,7 +637,9 @@ mod admin_transfer {
         let (admin, contract_id, client) = setup(&env);
         let new_admin = Address::generate(&env);
 
+        assert_eq!(client.get_admin(), admin);
         client.transfer_admin(&admin, &new_admin);
+        assert_eq!(client.get_admin(), new_admin);
 
         assert_eq!(
             env.events().all(),
@@ -728,6 +730,7 @@ mod admin_transfer {
         let client = DenylistGateClient::new(&env, &contract_id);
         let someone = Address::generate(&env);
 
+        assert_eq!(client.try_get_admin(), Err(Ok(Error::NotInitialized)));
         assert_eq!(
             client.try_transfer_admin(&someone, &someone),
             Err(Ok(Error::NotInitialized))

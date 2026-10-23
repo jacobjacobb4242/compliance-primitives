@@ -259,6 +259,14 @@ impl DenylistGate {
         Ok(())
     }
 
+    /// Return the configured admin address.
+    pub fn get_admin(env: Env) -> Result<Address, Error> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)
+    }
+
     /// Assign the compliance-officer role. Admin-only.
     pub fn set_compliance_officer(
         env: Env,

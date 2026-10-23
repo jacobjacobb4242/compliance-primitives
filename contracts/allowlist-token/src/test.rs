@@ -442,6 +442,17 @@ fn test_get_admin_returns_initialized_admin() {
 }
 
 #[test]
+fn test_get_admin_tracks_admin_transfer() {
+    let env = Env::default();
+    let (admin, _token_id, _contract_id, client) = setup(&env);
+    let new_admin = Address::generate(&env);
+
+    assert_eq!(client.get_admin(), admin);
+    client.transfer_admin(&admin, &new_admin);
+    assert_eq!(client.get_admin(), new_admin);
+}
+
+#[test]
 fn test_get_admin_fails_before_initialize() {
     let env = Env::default();
     let contract_id = env.register(AllowlistToken, ());

@@ -200,6 +200,14 @@ impl AllowlistToken {
         })
     }
 
+    /// Return the configured admin address.
+    pub fn get_admin(env: Env) -> Result<Address, Error> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)
+    }
+
     /// Configure the ed25519 public key that may authorize delegated admin
     /// actions without the admin account itself needing to submit the
     /// transaction. The direct-auth path remains unchanged and still uses
