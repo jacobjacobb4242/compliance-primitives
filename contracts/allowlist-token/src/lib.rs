@@ -36,7 +36,7 @@
 //! offline or in cold storage and a relayer pays the fees; use the direct
 //! path (`admin.require_auth()`) whenever the admin can sign the transaction
 //! itself.
-#![no_std]` Soroban contract that wraps an existing
+//! `allowlist-token` is a Soroban contract that wraps an existing
 //! SEP-41 token and only permits `transfer` calls between two addresses that
 //! are both present on an on-chain allowlist.
 //!
@@ -459,6 +459,16 @@ impl AllowlistToken {
         Self::require_admin(&env, &admin)?;
         env.storage().instance().remove(&DataKey::PendingUpgrade);
         Ok(())
+    }
+
+    /// Return the pending admin proposal, if one exists.
+    pub fn get_pending_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::PendingAdmin)
+    }
+
+    /// Return the pending upgrade and activation ledger, if one exists.
+    pub fn get_pending_upgrade(env: Env) -> Option<UpgradeState> {
+        env.storage().instance().get(&DataKey::PendingUpgrade)
     }
 
     /// Current on-chain schema version (see [`SCHEMA_VERSION`]).
