@@ -785,3 +785,31 @@ fn test_get_delegated_nonce_returns_last_used_nonce() {
 
     assert_eq!(client.get_delegated_nonce(&admin), 7);
 }
+
+#[test]
+fn test_propose_upgrade_rejects_delay_below_minimum() {
+    let env = Env::default();
+    let (admin, _token_id, _contract_id, client) = setup(&env);
+    let wasm_hash = BytesN::from_array(&env, &[0; 32]);
+
+    assert_eq!(
+        client.try_propose_upgrade(
+            &admin,
+            &wasm_hash,
+            &(MIN_UPGRADE_DELAY_LEDGERS - 1),
+        ),
+        Err(Ok(Error::UpgradeDelayTooShort))
+    );
+}
+
+#[test]
+fn test_propose_upgrade_accepts_minimum_delay() {
+    let env = Env::default();
+    let (admin, _token_id, _contract_id, client) = setup(&env);
+    let wasm_hash = BytesN::from_array(&env, &[0; 32]);
+
+    assert_eq!(
+        client.try_propose_upgrade(&admin, &wasm_hash, &MIN_UPGRADE_DELAY_LEDGERS),
+        Ok(Ok(()))
+    );
+}

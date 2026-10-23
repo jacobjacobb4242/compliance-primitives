@@ -120,6 +120,7 @@ No non-admin write path → storage-fill griefing not applicable.
 |----|----------|-----|-----|------------|
 | J5 | Compromised `issuer` rewrites jurisdiction flags to bypass jurisdiction rules. | High | Low | Recovery via `compliance_officer` + (pending) pause/#84/#85. Note: **`upgrade` is issuer-only with no multisig/timelock**, so a compromised `issuer` can also deploy arbitrary `new_wasm` — see J6. |
 | J6 | **Compromised `issuer` calls `upgrade` with malicious `new_wasm`** → total contract takeover / fund theft in integrators. | Critical | Low | **No current mitigation.** This is exactly why #113 (upgradeability pattern / migration path) matters: a safe upgrade must be (a) two-step (propose + delay + accept), (b) timelocked so a watchguard can pause, and (c) ideally gated by `multisig-admin`. Until #113 lands, `upgrade` is a single-point-of-catastrophe key. |
+| J7 | **Compromised admin proposes a same-ledger upgrade** in `allowlist-token` or `denylist-gate`. | Critical | Low | `propose_upgrade` rejects delays below `MIN_UPGRADE_DELAY_LEDGERS` (17,280 ledgers, approximately one day); watchers can review and call `cancel_upgrade` during that window. This limits, but does not eliminate, damage by a compromised admin. |
 
 ---
 

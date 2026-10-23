@@ -765,3 +765,31 @@ fn test_remove_multiple_from_denylist_removes_all_without_audit_log_noise() {
     assert!(client.check(&alice));
     assert!(client.check(&bob));
 }
+
+#[test]
+fn test_propose_upgrade_rejects_delay_below_minimum() {
+    let env = Env::default();
+    let (admin, _contract_id, client) = setup(&env);
+    let wasm_hash = soroban_sdk::BytesN::from_array(&env, &[0; 32]);
+
+    assert_eq!(
+        client.try_propose_upgrade(
+            &admin,
+            &wasm_hash,
+            &(MIN_UPGRADE_DELAY_LEDGERS - 1),
+        ),
+        Err(Ok(Error::UpgradeDelayTooShort))
+    );
+}
+
+#[test]
+fn test_propose_upgrade_accepts_minimum_delay() {
+    let env = Env::default();
+    let (admin, _contract_id, client) = setup(&env);
+    let wasm_hash = soroban_sdk::BytesN::from_array(&env, &[0; 32]);
+
+    assert_eq!(
+        client.try_propose_upgrade(&admin, &wasm_hash, &MIN_UPGRADE_DELAY_LEDGERS),
+        Ok(Ok(()))
+    );
+}

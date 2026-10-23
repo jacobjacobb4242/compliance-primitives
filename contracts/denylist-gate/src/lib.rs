@@ -66,6 +66,9 @@ use soroban_sdk::{
 /// within Soroban's default per-invocation write-entry budget of ~50.
 const MAX_BATCH_SIZE: u32 = 45;
 
+/// Minimum upgrade review window, approximately one day at five seconds per ledger.
+pub const MIN_UPGRADE_DELAY_LEDGERS: u32 = 17_280;
+
 // ---------------------------------------------------------------------------
 // Storage
 // ---------------------------------------------------------------------------
@@ -236,6 +239,7 @@ pub enum Error {
     MultisigNotEnabled = 12,
     NoPendingAdmin = 13,
     PendingAdminMismatch = 14,
+    UpgradeDelayTooShort = 15,
 }
 
 // ---------------------------------------------------------------------------
@@ -401,6 +405,9 @@ impl DenylistGate {
         delay_ledgers: u32,
     ) -> Result<(), Error> {
         Self::require_admin(&env, &admin)?;
+        if delay_ledgers < MIN_UPGRADE_DELAY_LEDGERS {
+            return Err(Error::UpgradeDelayTooShort);
+        }
         let state = UpgradeState {
             new_wasm,
             activated_at: u64::from(env.ledger().sequence())

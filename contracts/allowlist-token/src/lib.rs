@@ -36,27 +36,6 @@
 //! offline or in cold storage and a relayer pays the fees; use the direct
 //! path (`admin.require_auth()`) whenever the admin can sign the transaction
 //! itself.
-#![no_std]` Soroban contract that wraps an existing
-//! SEP-41 token and only permits `transfer` calls between two addresses that
-//! are both present on an on-chain allowlist.
-//!
-//! **Purpose**: give issuers of permissioned tokens (e.g. RWA or regulated
-//! stablecoins) a drop-in gate that blocks transfers to or from addresses
-//! that haven't cleared KYC/onboarding, without modifying the underlying
-//! token contract's own logic.
-//!
-//! **Composition**: deploy this contract in front of an issuer's real token
-//! and point clients at it instead of the underlying token — cleared
-//! transfers are forwarded on via a cross-contract call.
-//!
-//! **Roles**: there is a single privileged role, `admin`. Both
-//! `add_to_allowlist` and `remove_from_allowlist` are admin-only, and this
-//! contract has no compliance-officer role (that role exists only on
-//! `denylist-gate` and `jurisdiction-flag`). If an "officers may revoke but not
-//! grant" split is ever wanted here, it must be added deliberately, with
-//! `add_to_allowlist` staying admin-only.
-#![no_std]
-
 extern crate alloc;
 
 use soroban_sdk::{
@@ -148,6 +127,9 @@ pub struct UpgradeState {
 /// Current on-chain schema version for this contract instance.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// Minimum upgrade review window, approximately one day at five seconds per ledger.
+pub const MIN_UPGRADE_DELAY_LEDGERS: u32 = 17_280;
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -167,6 +149,7 @@ pub enum Error {
     ExpiredSignature = 11,
     /// `commit_upgrade` called with no pending upgrade, or before `activated_at`.
     UpgradeNotReady = 12,
+    UpgradeDelayTooShort = 13,
 }
 
 #[contract]
@@ -422,6 +405,9 @@ impl AllowlistToken {
         delay_ledgers: u32,
     ) -> Result<(), Error> {
         Self::require_admin(&env, &admin)?;
+        if delay_ledgers < MIN_UPGRADE_DELAY_LEDGERS {
+            return Err(Error::UpgradeDelayTooShort);
+        }
         let state = UpgradeState {
             new_wasm,
             activated_at: u64::from(env.ledger().sequence())
