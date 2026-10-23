@@ -426,6 +426,9 @@ impl JurisdictionFlag {
     ) -> Result<(), Error> {
         Self::require_compliance_authority(&env, &issuer)?;
         Self::validate_jurisdiction_code(&code)?;
+        if valid_until < env.ledger().sequence() {
+            return Err(Error::InvalidInput);
+        }
 
         let mut codes = Vec::new(&env);
         codes.push_back(code.clone());

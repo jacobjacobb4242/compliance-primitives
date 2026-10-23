@@ -565,6 +565,37 @@ fn test_no_expiry_never_expires() {
 }
 
 #[test]
+fn test_set_jurisdiction_until_validates_ledger_boundary() {
+    let env = Env::default();
+    let (issuer, _contract_id, client) = setup(&env);
+    let past_address = Address::generate(&env);
+    let current_address = Address::generate(&env);
+    let future_address = Address::generate(&env);
+    let code = String::from_str(&env, "US");
+    let current_sequence = 10;
+    env.ledger()
+        .with_mut(|ledger| ledger.sequence_number = current_sequence);
+
+    assert_eq!(
+        client.try_set_jurisdiction_until(
+            &issuer,
+            &past_address,
+            &code,
+            &(current_sequence - 1),
+        ),
+        Err(Ok(Error::InvalidInput))
+    );
+    assert_eq!(client.get_jurisdiction(&past_address), None);
+
+    client.set_jurisdiction_until(&issuer, &current_address, &code, &current_sequence);
+    assert_eq!(client.get_jurisdiction(&current_address), Some(code.clone()));
+
+    let future_sequence = current_sequence + 1;
+    client.set_jurisdiction_until(&issuer, &future_address, &code, &future_sequence);
+    assert_eq!(client.get_jurisdiction(&future_address), Some(code));
+}
+
+#[test]
 fn test_jurisdiction_expires_after_valid_until() {
     let env = Env::default();
     let (issuer, _contract_id, client) = setup(&env);
