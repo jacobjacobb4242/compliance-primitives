@@ -2,7 +2,7 @@ use super::*;
 use ed25519_dalek::SigningKey;
 use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
 use soroban_sdk::testutils::ed25519::Sign;
-use soroban_sdk::{contract, contractimpl, symbol_short, vec, Bytes, BytesN, Env, IntoVal, Map, Symbol, Val};
+use soroban_sdk::{contract, contractimpl, symbol_short, vec, Bytes, BytesN, Env, IntoVal, Map, Symbol, Val, Vec};
 use std::path::{Path, PathBuf};
 
 // ─── MockToken ───────────────────────────────────────────────────────────────
@@ -139,6 +139,59 @@ fn test_initialize_and_allowlist_roundtrip() {
 }
 
 #[test]
+fn test_multiple_allowlist_operations() {
+    let env = Env::default();
+    let (admin, _token_id, _contract_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    let addresses = vec![&env, alice.clone(), bob.clone()];
+
+    client.add_multiple_to_allowlist(&admin, &addresses, &None);
+    assert!(client.is_allowed(&alice));
+    assert!(client.is_allowed(&bob));
+
+    client.remove_multiple_from_allowlist(&admin, &addresses);
+    assert!(!client.is_allowed(&alice));
+    assert!(!client.is_allowed(&bob));
+}
+
+#[test]
+fn test_multiple_allowlist_operations_reject_batches_over_limit() {
+    let env = Env::default();
+    let (admin, _token_id, _contract_id, client) = setup(&env);
+    let mut addresses = Vec::new(&env);
+    for _ in 0..=MAX_BATCH_SIZE {
+        addresses.push_back(Address::generate(&env));
+    }
+
+    assert_eq!(
+        client.try_add_multiple_to_allowlist(&admin, &addresses, &None),
+        Err(Ok(Error::BatchTooLarge))
+    );
+    assert_eq!(
+        client.try_remove_multiple_from_allowlist(&admin, &addresses),
+        Err(Ok(Error::BatchTooLarge))
+    );
+}
+
+#[test]
+fn test_multiple_allowlist_operations_reject_non_admin() {
+    let env = Env::default();
+    let (_admin, _token_id, _contract_id, client) = setup(&env);
+    let impostor = Address::generate(&env);
+    let addresses = vec![&env, Address::generate(&env)];
+
+    assert_eq!(
+        client.try_add_multiple_to_allowlist(&impostor, &addresses, &None),
+        Err(Ok(Error::NotAuthorized))
+    );
+    assert_eq!(
+        client.try_remove_multiple_from_allowlist(&impostor, &addresses),
+        Err(Ok(Error::NotAuthorized))
+    );
+}
+
+#[test]
 fn test_transfer_forwards_to_underlying_token_when_both_allowlisted() {
     let env = Env::default();
     let (admin, token_id, _contract_id, client) = setup(&env);
@@ -185,7 +238,7 @@ fn test_budget_regression_allowlist_add_to_allowlist() {
 
     let mut budget = env.cost_estimate().budget();
     budget.reset_default();
-    client.add_to_allowlist(&admin, &alice);
+    client.add_to_allowlist(&admin, &alice, &None);
 
     let measured = (budget.cpu_instruction_cost(), budget.memory_bytes_cost());
     let baseline_path = baseline_path_for_manifest_dir(PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()));
@@ -232,7 +285,7 @@ fn test_delegated_add_costs_more_cpu_than_direct_add() {
 
     let mut budget = env.cost_estimate().budget();
     budget.reset_default();
-    client.add_to_allowlist(&admin, &alice);
+    client.add_to_allowlist(&admin, &alice, &None);
     let direct_cpu = budget.cpu_instruction_cost();
 
     budget.reset_default();
@@ -644,7 +697,7 @@ fn test_officer_can_remove_from_allowlist_after_assignment() {
     let officer = Address::generate(&env);
     let alice = Address::generate(&env);
 
-    client.add_to_allowlist(&admin, &alice);
+    client.add_to_allowlist(&admin, &alice, &None);
     client.set_compliance_officer(&admin, &officer);
 
     client.remove_from_allowlist(&officer, &alice);
@@ -680,7 +733,7 @@ fn test_officer_cannot_add_to_allowlist() {
     client.set_compliance_officer(&admin, &officer);
 
     assert_eq!(
-        client.try_add_to_allowlist(&officer, &alice),
+        client.try_add_to_allowlist(&officer, &alice, &None),
         Err(Ok(Error::NotAuthorized))
     );
     assert!(!client.is_allowed(&alice));
@@ -693,7 +746,7 @@ fn test_revoked_officer_can_no_longer_remove_from_allowlist() {
     let officer = Address::generate(&env);
     let alice = Address::generate(&env);
 
-    client.add_to_allowlist(&admin, &alice);
+    client.add_to_allowlist(&admin, &alice, &None);
     client.set_compliance_officer(&admin, &officer);
     client.revoke_compliance_officer(&admin);
 
@@ -712,8 +765,8 @@ fn test_transfer_blocked_while_paused_and_succeeds_after_unpause() {
     let (admin, token_id, _contract_id, client) = setup(&env);
     let alice = Address::generate(&env);
     let bob = Address::generate(&env);
-    client.add_to_allowlist(&admin, &alice);
-    client.add_to_allowlist(&admin, &bob);
+    client.add_to_allowlist(&admin, &alice, &None);
+    client.add_to_allowlist(&admin, &bob, &None);
 
     assert!(!client.is_paused());
     client.pause(&admin);
