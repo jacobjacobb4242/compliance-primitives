@@ -4,25 +4,25 @@
  *
  * Soroban #[contractevent] structs with #[topic] fields are published as
  * a topic array where:
- *   topic[0]  = ScVal::Symbol — the event name (e.g. "AllowAdd")
+ *   topic[0]  = ScVal::Symbol — the snake_case event name (e.g. "allow_add")
  *   topic[1+] = the fields annotated #[topic] in declaration order
- *   data      = ScVal — struct-value encoding of any non-topic fields
+ *   data      = ScVal::Map — non-topic fields keyed by their field names
  *
  * For primitive and circuit-breaker events:
  *
- *   AllowAdd        topics: [Symbol("AllowAdd"), Address]          data: Void
- *   AllowRemove     topics: [Symbol("AllowRemove"), Address]        data: Void
- *   Blocked         topics: [Symbol("Blocked"), Address, Address]   data: I128
- *   DenyAdd         topics: [Symbol("DenyAdd"), Address]            data: Void
- *   DenyRemove      topics: [Symbol("DenyRemove"), Address]         data: Void
- *   JurisdictionSet topics: [Symbol("JurisdictionSet"), Address]    data: String(code)
- *   Frozen          topics: [Symbol("Frozen"), Address(admin)]       data: Void
- *   Unfrozen        topics: [Symbol("Unfrozen"), Address(admin)]     data: Void
+ *   AllowAdd        topics: [Symbol("allow_add"), Address]          data: {}
+ *   AllowRemove     topics: [Symbol("allow_remove"), Address]        data: {}
+ *   Blocked         topics: [Symbol("blocked"), Address, Address]   data: { amount: I128 }
+ *   DenyAdd         topics: [Symbol("deny_add"), Address]            data: {}
+ *   DenyRemove      topics: [Symbol("deny_remove"), Address]         data: {}
+ *   JurisdictionSet topics: [Symbol("jurisdiction_set"), Address]    data: { code: String }
+ *   Frozen          topics: [Symbol("frozen"), Address(admin)]       data: {}
+ *   Unfrozen        topics: [Symbol("unfrozen"), Address(admin)]     data: {}
  *
  * For policy-engine:
  *
- *   PolicyResult topics: [Symbol("PolicyResult"), Bool(passed)]
- *               data:   Vec[Address(from), Address(to)]
+ *   PolicyResult topics: [Symbol("policy_result"), Bool(passed)]
+ *               data:   Map { from: Address, to: Address }
  *
  * For multisig-admin:
  *
@@ -32,21 +32,8 @@
  *
  * For the audit-log contract's ComplianceEvent:
  *
- *   ComplianceEvent topics: [Symbol(kind), Address(subject)]
- *                   data  : Map { "source": Address, "detail": String }
- *
- *   The audit-log event has NO struct-name prefix topic — the two #[topic]
- *   fields (kind, subject) fill the topic array directly.  The first topic
- *   is a Symbol whose value is the event kind recorded by the caller (e.g.
- *   "deny_add"), and the second topic is the subject address.  The data map
- *   carries the source address and a detail string.
- *
- *   Because the kind symbol overlaps with the existing primitive event names
- *   ("deny_add", "deny_remove", …), audit-log events are identified by
- *   detecting the presence of the source/detail data map rather than by a
- *   unique topic[0] name.  The decoded event is stored with eventType
- *   "ComplianceEvent" and the kind value in the `kind` field of the
- *   extended RawEvent.
+ *   ComplianceEvent topics: [Symbol("compliance_event"), Symbol(kind), Address(subject)]
+ *                   data  : Map { source: Address, detail: String }
  *
  * We parse XDR manually using DataView — no external XDR lib — because the
  * values we need are simple enough and we want zero extra dependencies.
@@ -307,15 +294,21 @@ function base32Encode(data: Uint8Array): string {
 // ─── Event decoding ───────────────────────────────────────────────────────────
 
 const KNOWN_EVENTS = new Set([
-  // compliance-primitives events
+  // #[contractevent] names are normalized from snake_case below.
   "AllowAdd",
   "AllowRemove",
   "Blocked",
   "DenyAdd",
   "DenyRemove",
   "JurisdictionSet",
+  "JurisdictionExpired",
+  "JurisdictionRemoved",
   "Frozen",
   "Unfrozen",
+  "AdminSet",
+  "DenylistGateSet",
+  "JurisdictionFlagSet",
+  "CircuitBreakerSet",
   // policy-engine events
   "PolicyResult",
   // multisig-admin events (symbol_short! names from the contract)
@@ -324,6 +317,28 @@ const KNOWN_EVENTS = new Set([
   "ThreshSet",
   "AuthOk",
 ]);
+
+const CONTRACT_EVENT_NAMES: Record<string, string> = {
+  allow_add: "AllowAdd",
+  allow_remove: "AllowRemove",
+  blocked: "Blocked",
+  deny_add: "DenyAdd",
+  deny_remove: "DenyRemove",
+  jurisdiction_set: "JurisdictionSet",
+  jurisdiction_expired: "JurisdictionExpired",
+  jurisdiction_removed: "JurisdictionRemoved",
+  frozen: "Frozen",
+  unfrozen: "Unfrozen",
+  policy_result: "PolicyResult",
+  admin_set: "AdminSet",
+  denylist_gate_set: "DenylistGateSet",
+  jurisdiction_flag_set: "JurisdictionFlagSet",
+  circuit_breaker_set: "CircuitBreakerSet",
+};
+
+function mapField(data: ScVal, name: string): ScVal | undefined {
+  return data.type === "Map" ? data.value.get(name) : undefined;
+}
 
 export function decodeEvent(
   raw: RawSorobanEvent
@@ -366,41 +381,31 @@ export function decodeEvent(
       rawData: raw.value ?? "",
     };
 
-    // ── audit-log ComplianceEvent detection ──────────────────────────────────
-    //
-    // ComplianceEvent has NO struct-name prefix topic.  The topic array is
-    // exactly [Symbol(kind), Address(subject)] and the data is a Map
-    // containing "source" (Address) and "detail" (String).  We distinguish
-    // it from the primitive events by checking that the data is a Map with
-    // those two keys — primitive events never produce a Map as their data.
+    // ── audit-log ComplianceEvent ────────────────────────────────────────────
     if (
-      topics.length === 2 &&
+      topics.length === 3 &&
       topics[0].type === "Symbol" &&
-      topics[1].type === "Address" &&
+      topics[0].value === "compliance_event" &&
+      topics[1].type === "Symbol" &&
+      topics[2].type === "Address" &&
       dataVal.type === "Map"
     ) {
-      const dataMap = dataVal.value;
-      const sourceVal = dataMap.get("source");
-      const detailVal = dataMap.get("detail");
+      const sourceVal = mapField(dataVal, "source");
+      const detailVal = mapField(dataVal, "detail");
 
-      if (
-        sourceVal?.type === "Address" &&
-        (detailVal?.type === "String" || detailVal?.type === "Symbol" || detailVal == null)
-      ) {
+      if (sourceVal?.type === "Address" && detailVal?.type === "String") {
         return {
           ledgerSequence: raw.ledger,
           timestamp,
           contractId: raw.contractId,
           eventType: "ComplianceEvent",
-          address: topics[1].value,                   // subject
+          address: topics[2].value,
           addressTo: null,
           amount: null,
           jurisdiction: null,
-          kind: topics[0].value,                       // e.g. "deny_add"
+          kind: topics[1].value,
           source: sourceVal.value,
-          detail: detailVal?.type === "String" || detailVal?.type === "Symbol"
-            ? detailVal.value
-            : null,
+          detail: detailVal.value,
           policyFrom: null,
           policyTo: null,
           policyPassed: null,
@@ -413,12 +418,10 @@ export function decodeEvent(
       }
     }
 
-    // ── Primitive event decoding (name in topic[0]) ───────────────────────────
-    //
-    // topics[0] must be a Symbol naming the event
+    // ── Contract and tuple event decoding ────────────────────────────────────
     const nameVal = topics[0];
     if (nameVal.type !== "Symbol") return null;
-    const eventType = nameVal.value;
+    const eventType = CONTRACT_EVENT_NAMES[nameVal.value] ?? nameVal.value;
 
     // ── circuit-breaker state-change events ───────────────────────────────────
     //
@@ -438,8 +441,8 @@ export function decodeEvent(
     // ── policy-engine PolicyResult ────────────────────────────────────────────
     //
     // PolicyResult has a different shape from the address-keyed events:
-    //   topics: [Symbol("PolicyResult"), Bool(passed)]
-    //   data:   Vec[Address(from), Address(to)]
+    //   topics: [Symbol("policy_result"), Bool(passed)]
+    //   data:   Map { from: Address, to: Address }
     //
     // Handle it here before the section that requires topics[1] to be an
     // Address.
@@ -451,13 +454,10 @@ export function decodeEvent(
       let policyFrom: string | null = null;
       let policyTo: string | null = null;
 
-      // data is Vec[Address(from), Address(to)]
-      if (dataVal.type === "Vec" && dataVal.value.length >= 2) {
-        const fromVal = dataVal.value[0];
-        const toVal = dataVal.value[1];
-        if (fromVal.type === "Address") policyFrom = fromVal.value;
-        if (toVal.type === "Address") policyTo = toVal.value;
-      }
+      const fromVal = mapField(dataVal, "from");
+      const toVal = mapField(dataVal, "to");
+      if (fromVal?.type === "Address") policyFrom = fromVal.value;
+      if (toVal?.type === "Address") policyTo = toVal.value;
 
       return {
         ledgerSequence: raw.ledger,
@@ -480,6 +480,17 @@ export function decodeEvent(
         rawTopics: JSON.stringify(raw.topic),
         rawData: raw.value ?? "",
       };
+    }
+
+    if (
+      eventType === "AdminSet" ||
+      eventType === "DenylistGateSet" ||
+      eventType === "JurisdictionFlagSet" ||
+      eventType === "CircuitBreakerSet"
+    ) {
+      const addressVal = topics[1];
+      if (addressVal?.type !== "Address") return null;
+      return { ...base, eventType, address: addressVal.value };
     }
 
     // ── multisig-admin signer/threshold events ────────────────────────────────
@@ -583,7 +594,7 @@ export function decodeEvent(
 
     // topics[1] is always the primary address for remaining event types
     const addrVal = topics[1];
-    if (addrVal.type !== "Address") return null;
+    if (addrVal?.type !== "Address") return null;
     const address = addrVal.value;
 
     let addressTo: string | null = null;
@@ -594,11 +605,13 @@ export function decodeEvent(
       // topics[2] = to address
       const toVal = topics[2];
       if (toVal?.type === "Address") addressTo = toVal.value;
-      if (dataVal.type === "I128") amount = dataVal.value.toString();
+      const amountVal = mapField(dataVal, "amount");
+      if (amountVal?.type === "I128") amount = amountVal.value.toString();
     }
 
     if (eventType === "JurisdictionSet") {
-      if (dataVal.type === "String") jurisdiction = dataVal.value;
+      const codeVal = mapField(dataVal, "code");
+      if (codeVal?.type === "String") jurisdiction = codeVal.value;
     }
 
     return {
@@ -620,127 +633,6 @@ export function decodeEvent(
       rawTopics: JSON.stringify(raw.topic),
       rawData: raw.value ?? "",
     } as const;
-
-    if (eventType === "SignerAdd" || eventType === "SignerRm") {
-      // topics: [Symbol, Address(signer)]
-      if (raw.topic.length < 2) return null;
-      const signerVal = topics[1];
-      if (signerVal.type !== "Address") return null;
-      return {
-        ...base,
-        signerAddress: signerVal.value,
-        newThreshold: null,
-        validCount: null,
-      };
-    }
-
-    if (eventType === "ThreshSet") {
-      // topics: [Symbol]  data: U32(threshold)
-      if (dataVal.type !== "U32") return null;
-      return {
-        ...base,
-        signerAddress: null,
-        newThreshold: dataVal.value,
-        validCount: null,
-      };
-    }
-
-    if (eventType === "AuthOk") {
-      // topics: [Symbol]  data: Vec[U32(valid_count), U32(threshold)]
-      // The Soroban SDK encodes a Rust tuple (u32, u32) as a two-element ScVec.
-      let validCount: number | null = null;
-      let newThreshold: number | null = null;
-      if (dataVal.type === "Vec" && dataVal.value.length === 2) {
-        const v0 = dataVal.value[0];
-        const v1 = dataVal.value[1];
-        if (v0.type === "U32") validCount = v0.value;
-        if (v1.type === "U32") newThreshold = v1.value;
-      }
-      return {
-        ...base,
-        signerAddress: null,
-        newThreshold,
-        validCount,
-      };
-    }
-
-    // ── compliance-aggregator configuration events ────────────────────────────
-    //
-    // AdminSet, DenylistGateSet, JurisdictionFlagSet all share the same shape:
-    //   topics: [Symbol(name), Address(configured_contract_or_admin)]
-    //   data:   Void
-
-    if (
-      eventType === "AdminSet" ||
-      eventType === "DenylistGateSet" ||
-      eventType === "JurisdictionFlagSet"
-    ) {
-      if (raw.topic.length < 2) return null;
-      const addrVal = topics[1];
-      if (addrVal.type !== "Address") return null;
-
-      return {
-        ...base,
-        // Reuse `address` to hold the newly configured admin/gate/flag address
-        address: addrVal.value,
-        signerAddress: null,
-        newThreshold: null,
-        validCount: null,
-      };
-    }
-
-    // ── policy-engine evaluation event ───────────────────────────────────────
-    //
-    // PolicyResult:
-    //   topics: [Symbol("PolicyResult"), Bool(passed)]
-    //   data:   Vec[Address(from), Address(to)]
-
-    if (eventType === "PolicyResult") {
-      if (raw.topic.length < 2) return null;
-      const passedVal = topics[1];
-      if (passedVal.type !== "Bool") return null;
-
-      let policyFrom: string | null = null;
-      let policyTo: string | null = null;
-
-      // data is Vec[Address(from), Address(to)]
-      if (dataVal.type === "Vec" && dataVal.value.length >= 2) {
-        const fromVal = dataVal.value[0];
-        const toVal = dataVal.value[1];
-        if (fromVal.type === "Address") policyFrom = fromVal.value;
-        if (toVal.type === "Address") policyTo = toVal.value;
-      }
-
-      return {
-        ...base,
-        signerAddress: null,
-        newThreshold: null,
-        validCount: null,
-        policyFrom,
-        policyTo,
-        policyPassed: passedVal.value,
-      };
-    }
-
-    // ── circuit-breaker state-change events ───────────────────────────────────
-    //
-    // Frozen / Unfrozen:
-    //   topics: [Symbol("Frozen")] or [Symbol("Unfrozen")]
-    //   data:   Void
-    //
-    // No address or payload — the event records that the named contract's
-    // freeze state changed. The contract_id column identifies which breaker.
-
-    if (eventType === "Frozen" || eventType === "Unfrozen") {
-      return {
-        ...base,
-        signerAddress: null,
-        newThreshold: null,
-        validCount: null,
-      };
-    }
-
-    return null;
   } catch (err) {
     console.error(`Failed to decode event from contract ${raw.contractId}:`, err);
     return null;
