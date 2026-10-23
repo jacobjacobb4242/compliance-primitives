@@ -46,6 +46,7 @@ deployment and walkthrough.
 Each example under `/examples` demonstrates a different composition pattern:
 
 - **[circuit-breaker-policy-engine](./examples/circuit-breaker-policy-engine)** — wires `circuit-breaker` as a pre-check before `policy-engine` evaluation
+- **[compliance-integration-flow](./examples/compliance-integration-flow)** — combines jurisdiction policy evaluation, a multisig-governed circuit breaker, and audit logging
 - **[denylist-gate-consumer](./examples/denylist-gate-consumer)** — minimal token calling `denylist-gate` and `circuit-breaker` before transfers
 - **[denylist-gate-sep41](./examples/denylist-gate-sep41)** — `denylist-gate` integration for SEP-41 anchor compliance
 - **[jurisdiction-flag-consumer](./examples/jurisdiction-flag-consumer)** — token enforcing jurisdiction-based transfer restrictions
