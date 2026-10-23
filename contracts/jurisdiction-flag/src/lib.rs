@@ -21,7 +21,8 @@
 //! `allowed_codes` entry of `"US"`.
 //!
 //! **Callers**: the configured issuer or compliance officer may call
-//! `set_jurisdiction` and `add_jurisdiction`; only the issuer may call
+//! `set_jurisdiction`, `set_jurisdiction_until`, `add_jurisdiction`, and
+//! `set_multiple_jurisdictions`; only the issuer may call
 //! `remove_jurisdiction`, `remove_jurisdiction_multiple`, or `upgrade`.
 //! `set_jurisdiction` / `get_jurisdiction` remain single-code conveniences.
 //! Use `add_jurisdiction`, `remove_jurisdiction`, and `list_jurisdictions`
@@ -257,21 +258,25 @@ impl JurisdictionFlag {
 
     /// Assign the compliance-officer role. Issuer-only.
     ///
-    /// The officer role grants access to exactly one entry point:
-    /// [`set_jurisdiction`](Self::set_jurisdiction), which is guarded by
-    /// `require_compliance_authority` (issuer *or* officer). Every other
-    /// mutating entry point is guarded by `require_issuer` and therefore
-    /// remains issuer-only, including:
+    /// The officer role grants access to exactly these entry points, each
+    /// guarded by `require_compliance_authority` (issuer *or* officer):
     ///
-    /// - [`remove_jurisdiction_multiple`](Self::remove_jurisdiction_multiple)
+    /// - [`set_jurisdiction`](Self::set_jurisdiction)
+    /// - [`set_jurisdiction_until`](Self::set_jurisdiction_until)
+    /// - [`add_jurisdiction`](Self::add_jurisdiction)
+    /// - [`set_multiple_jurisdictions`](Self::set_multiple_jurisdictions)
+    ///
+    /// All other mutating entry points remain issuer-only, including:
+    ///
+    /// - [`remove_jurisdiction`](Self::remove_jurisdiction) and
+    ///   [`remove_jurisdiction_multiple`](Self::remove_jurisdiction_multiple)
     /// - [`pause`](Self::pause) / [`unpause`](Self::unpause)
     /// - [`upgrade`](Self::upgrade)
     /// - [`set_compliance_officer`](Self::set_compliance_officer) /
     ///   [`revoke_compliance_officer`](Self::revoke_compliance_officer)
     ///
-    /// There are no `_until` or multiple-address variants of
-    /// `set_jurisdiction`; the officer role does not extend to any other
-    /// function.
+    /// The officer role does not extend to removal, pause, upgrade, or
+    /// issuer/officer management functions.
     ///
     /// Auth: gated by [`require_issuer`] — only the issuer may delegate this role.
     pub fn set_compliance_officer(
@@ -288,11 +293,14 @@ impl JurisdictionFlag {
 
     /// Revoke the compliance-officer role. Issuer-only.
     ///
-    /// After revocation, the officer no longer satisfies
-    /// `require_compliance_authority`, so the only entry point it previously
-    /// unlocked — [`set_jurisdiction`](Self::set_jurisdiction) — reverts to
-    /// issuer-only access. All other mutating entry points
-    /// ([`remove_jurisdiction_multiple`](Self::remove_jurisdiction_multiple),
+    /// After revocation, the former officer no longer satisfies
+    /// `require_compliance_authority`, so [`set_jurisdiction`](Self::set_jurisdiction),
+    /// [`set_jurisdiction_until`](Self::set_jurisdiction_until),
+    /// [`add_jurisdiction`](Self::add_jurisdiction), and
+    /// [`set_multiple_jurisdictions`](Self::set_multiple_jurisdictions) revert
+    /// to issuer-only access. All other mutating entry points
+    /// ([`remove_jurisdiction`](Self::remove_jurisdiction),
+    /// [`remove_jurisdiction_multiple`](Self::remove_jurisdiction_multiple),
     /// [`pause`](Self::pause), [`unpause`](Self::unpause),
     /// [`upgrade`](Self::upgrade)) were already issuer-only via
     /// `require_issuer` and are unaffected.
@@ -616,9 +624,9 @@ impl JurisdictionFlag {
     ///
     /// ## Authorization split
     ///
-    /// This helper enforces a *delegated* authorization level intended for
-    /// routine compliance data operations (currently: [`set_jurisdiction`]).
-    /// The issuer can optionally appoint a compliance officer via
+    /// This helper enforces a *delegated* authorization level for
+    /// [`set_jurisdiction`], [`set_jurisdiction_until`], [`add_jurisdiction`],
+    /// and [`set_multiple_jurisdictions`]. The issuer can optionally appoint a compliance officer via
     /// [`set_compliance_officer`]; once appointed, that officer may call any
     /// entry point gated by this helper without requiring the issuer key for
     /// every individual flag operation.

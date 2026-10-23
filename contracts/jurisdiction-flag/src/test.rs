@@ -693,6 +693,122 @@ fn test_set_multiple_jurisdictions_compliance_officer_can_set() {
 }
 
 #[test]
+fn test_compliance_officer_entry_point_access_matrix() {
+    let env = Env::default();
+    let (issuer, _contract_id, client) = setup(&env);
+    let officer = Address::generate(&env);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    let code = String::from_str(&env, "US");
+    client.set_compliance_officer(&issuer, &officer);
+
+    macro_rules! check_access {
+        ($name:literal, $result:expr, $expected:expr) => {{
+            let actual = match $result {
+                Ok(Ok(())) => true,
+                Err(Ok(Error::NotAuthorized)) => false,
+                other => panic!("unexpected result for {}: {:?}", $name, other),
+            };
+            assert_eq!(actual, $expected, "{} officer access mismatch", $name);
+        }};
+    }
+
+    let officer_entry_points = [
+        ("set_jurisdiction", true),
+        ("set_jurisdiction_until", true),
+        ("add_jurisdiction", true),
+        ("set_multiple_jurisdictions", true),
+        ("remove_jurisdiction", false),
+        ("remove_jurisdiction_multiple", false),
+        ("pause", false),
+        ("unpause", false),
+        ("set_compliance_officer", false),
+        ("revoke_compliance_officer", false),
+        ("transfer_issuer", false),
+        ("propose_issuer", false),
+        ("cancel_issuer_proposal", false),
+        ("upgrade", false),
+    ];
+
+    for (entry_point, expected) in officer_entry_points {
+        match entry_point {
+            "set_jurisdiction" => check_access!(
+                entry_point,
+                client.try_set_jurisdiction(&officer, &alice, &code),
+                expected
+            ),
+            "set_jurisdiction_until" => check_access!(
+                entry_point,
+                client.try_set_jurisdiction_until(&officer, &alice, &code, &env.ledger().sequence()),
+                expected
+            ),
+            "add_jurisdiction" => check_access!(
+                entry_point,
+                client.try_add_jurisdiction(&officer, &alice, &code),
+                expected
+            ),
+            "set_multiple_jurisdictions" => {
+                let entries = vec![&env, (alice.clone(), code.clone())];
+                check_access!(
+                    entry_point,
+                    client.try_set_multiple_jurisdictions(&officer, &entries),
+                    expected
+                );
+            }
+            "remove_jurisdiction" => check_access!(
+                entry_point,
+                client.try_remove_jurisdiction(&officer, &alice, &code),
+                expected
+            ),
+            "remove_jurisdiction_multiple" => {
+                let addresses = vec![&env, alice.clone()];
+                check_access!(
+                    entry_point,
+                    client.try_remove_jurisdiction_multiple(&officer, &addresses),
+                    expected
+                );
+            }
+            "pause" => check_access!(entry_point, client.try_pause(&officer), expected),
+            "unpause" => check_access!(entry_point, client.try_unpause(&officer), expected),
+            "set_compliance_officer" => check_access!(
+                entry_point,
+                client.try_set_compliance_officer(&officer, &bob),
+                expected
+            ),
+            "revoke_compliance_officer" => check_access!(
+                entry_point,
+                client.try_revoke_compliance_officer(&officer),
+                expected
+            ),
+            "transfer_issuer" => check_access!(
+                entry_point,
+                client.try_transfer_issuer(&officer, &bob),
+                expected
+            ),
+            "propose_issuer" => check_access!(
+                entry_point,
+                client.try_propose_issuer(&officer, &bob),
+                expected
+            ),
+            "cancel_issuer_proposal" => check_access!(
+                entry_point,
+                client.try_cancel_issuer_proposal(&officer),
+                expected
+            ),
+            "upgrade" => {
+                let wasm_hash = BytesN::from_array(&env, &[0; 32]);
+                check_access!(
+                    entry_point,
+                    client.try_upgrade(&officer, &wasm_hash),
+                    expected
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
 fn test_set_multiple_jurisdictions_paused_contract_is_rejected() {
     let env = Env::default();
     let (issuer, _contract_id, client) = setup(&env);
