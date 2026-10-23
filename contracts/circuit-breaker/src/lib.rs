@@ -124,8 +124,15 @@ pub struct Unfrozen {
 #[contractevent]
 pub struct AdminProposed {
     #[topic]
-    pub admin: Address,
-    pub new_admin: Address,
+    pub current: Address,
+    #[topic]
+    pub proposed: Address,
+}
+
+#[contractevent]
+pub struct AdminProposalCancelled {
+    #[topic]
+    pub current: Address,
 }
 
 /// Emitted when a proposed admin accepts the transfer via `accept_admin`.
@@ -273,8 +280,8 @@ impl CircuitBreaker {
         Self::require_admin(&env, &admin)?;
         env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
         AdminProposed {
-            admin: admin.clone(),
-            new_admin: new_admin.clone(),
+            current: admin,
+            proposed: new_admin,
         }
         .publish(&env);
         Self::extend_instance_ttl(&env);
@@ -333,6 +340,7 @@ impl CircuitBreaker {
             return Err(Error::NoPendingAdmin);
         }
         env.storage().instance().remove(&DataKey::PendingAdmin);
+        AdminProposalCancelled { current: admin }.publish(&env);
         Ok(())
     }
 

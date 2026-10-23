@@ -39,7 +39,41 @@ Every event body is either:
 
 ## Events by contract
 
+### Proposal lifecycle
+
+Proposal lifecycle event names and field names are consistent across the
+contracts that support each operation. All successful `propose_admin` calls
+emit `AdminProposed`; its two address fields are indexed topics. Contracts
+that expose `cancel_admin_proposal` emit `AdminProposalCancelled` with the
+current admin as its topic. `accept_admin` emits the existing
+`AdminTransferred` event.
+
+`allowlist-token` and `denylist-gate` emit the following typed upgrade events:
+
+```
+UpgradeProposed  topics: ["upgrade_proposed", admin]
+                data: { "new_wasm": BytesN<32>, "activated_at": u64 }
+UpgradeCancelled topics: ["upgrade_cancelled", admin]
+                 data: {}
+UpgradeCommitted topics: ["upgrade_committed", admin]
+                 data: { "new_wasm": BytesN<32> }
+```
+
+Upgrade events are emitted only after the corresponding authorized call has
+passed validation. `UpgradeProposed` includes the computed activation ledger,
+not the relative delay, so watchers can determine when the upgrade becomes
+committable.
+
 ### `allowlist-token`
+
+#### `AdminProposed`
+
+Emitted when `propose_admin(current_admin, proposed)` records a pending admin.
+
+```
+topics: ["admin_proposed", <current: Address>, <proposed: Address>]
+data: {}
+```
 
 #### `AllowAdd`
 

@@ -1,7 +1,7 @@
 extern crate std;
 
 use super::*;
-use soroban_sdk::testutils::Address as _;
+use soroban_sdk::testutils::{Address as _, Events as _};
 use soroban_sdk::{Env, IntoVal};
 
 fn setup(env: &Env) -> (Address, CircuitBreakerClient<'_>) {
@@ -206,10 +206,14 @@ fn test_propose_admin_emits_event() {
     let events = env.events().all();
     let (_contract_id, topics, _data) = events.last().unwrap();
     assert_eq!(
-        topics.get_unchecked(0),
-        soroban_sdk::Symbol::new(&env, "admin_proposed").into_val(&env)
+        topics,
+        (
+            soroban_sdk::Symbol::new(&env, "admin_proposed"),
+            admin.clone(),
+            new_admin,
+        )
+            .into_val(&env)
     );
-    assert_eq!(topics.get_unchecked(1), admin.clone().into_val(&env));
 }
 
 #[test]
