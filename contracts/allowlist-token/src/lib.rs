@@ -15,14 +15,27 @@
 //! and point clients at it instead of the underlying token — cleared
 //! transfers are forwarded on via a cross-contract call.
 //!
-//! **Security boundary**: this wrapper cannot prevent callers from invoking
-//! the underlying token directly. That token must itself restrict transfers to
-//! calls from this wrapper, or the architecture must keep all underlying
-//! tokens in wrapper-controlled custody and prevent direct holder transfers.
-//! SAC `AUTH_REQUIRED` and `AUTH_REVOCABLE` flags alone do not restrict which
-//! contract may call `transfer`; they authorize or revoke accounts.
-#![no_std]
-
+//! **Roles**: `admin` is the primary privileged role. `add_to_allowlist`
+//! (and `add_to_allowlist_delegated`) are admin-only. An optional
+//! compliance officer, assigned with `set_compliance_officer` and removed
+//! with `revoke_compliance_officer` (both admin-only), may call
+//! `remove_from_allowlist` but can never grant access or manage roles.
+//!
+//! **Delegated actions**: `add_to_allowlist_delegated` lets a relayer submit
+//! an allowlist addition on the admin's behalf, without the admin account
+//! signing the transaction. The admin first registers an ed25519 public key
+//! with `set_delegated_admin_key`. The holder of the matching private key then
+//! signs the payload
+//! `allowlist-delegated-v1:<target>:add_to_allowlist:<nonce>:<expiry>`, where
+//! `<target>` is the address being allowlisted, `<nonce>` is a `u64` and
+//! `<expiry>` is a ledger timestamp in seconds. Each admin has a
+//! replay-protection nonce: a call is rejected with `InvalidNonce` unless
+//! `nonce` is strictly greater than the last accepted one (readable via
+//! `get_delegated_nonce`), and with `ExpiredSignature` once the ledger
+//! timestamp reaches `expiry`. Use this path when the admin key is kept
+//! offline or in cold storage and a relayer pays the fees; use the direct
+//! path (`admin.require_auth()`) whenever the admin can sign the transaction
+//! itself.
 extern crate alloc;
 
 use soroban_sdk::{
@@ -164,6 +177,14 @@ impl AllowlistToken {
             version: String::from_str(&env, env!("CARGO_PKG_VERSION")),
             admin,
         })
+    }
+
+    /// Return the configured admin address.
+    pub fn get_admin(env: Env) -> Result<Address, Error> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)
     }
 
     /// Configure the ed25519 public key that may authorize delegated admin
