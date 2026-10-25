@@ -4,8 +4,8 @@
  * The policy-engine emits a PolicyResult event on every call to `evaluate`,
  * regardless of whether the policy passed or failed.  The wire format is:
  *
- *   topics: [Symbol("PolicyResult"), Bool(passed)]
- *   data:   Vec[Address(from), Address(to)]
+ *   topics: [Symbol("policy_result"), Bool(passed)]
+ *   data:   Map { from: Address, to: Address }
  *
  * This test file validates that decodeEvent correctly maps that shape to a
  * RawEvent with:
@@ -18,7 +18,7 @@
  * XDR layout recap for values encoded here:
  *   ScVal::Symbol(s)  → [u32 disc=15] [u32 len] [bytes] [pad to 4]
  *   ScVal::Bool(b)    → [u32 disc=0]  [u32 0-or-1]
- *   ScVal::Vec        → [u32 disc=16] [u32 1=Some] [u32 len] [elements...]
+ *   ScVal::Map        → [u32 disc=17] [u32 1=Some] [u32 len] [entries...]
  *   ScVal::Address(Account) → [u32 disc=18] [u32 0] [u32 0] [32 bytes]
  *
  * Run with:
@@ -70,11 +70,9 @@ function xdrAccountAddress(pubkey: Uint8Array): Uint8Array {
   );
 }
 
-function xdrVec(items: Uint8Array[]): Uint8Array {
-  // ScVal::Vec → disc=16, Some=1, count, items...
-  const parts: Uint8Array[] = [u32(16), u32(1), u32(items.length)];
-  for (const item of items) parts.push(item);
-  return concat(...parts);
+function xdrMap(entries: [string, Uint8Array][]): Uint8Array {
+  const fields = entries.flatMap(([key, value]) => [xdrSymbol(key), value]);
+  return concat(u32(17), u32(1), u32(entries.length), ...fields);
 }
 
 function toBase64(bytes: Uint8Array): string {
@@ -93,10 +91,13 @@ const CLOSED_AT    = "2025-09-01T00:00:00Z";
 const EXPECTED_TS  = Math.floor(new Date(CLOSED_AT).getTime() / 1000);
 
 // Pre-encode the fixed topics and data
-const T0  = toBase64(xdrSymbol("PolicyResult"));
+const T0  = toBase64(xdrSymbol("policy_result"));
 const T1_PASS = toBase64(xdrBool(true));
 const T1_FAIL = toBase64(xdrBool(false));
-const DATA = toBase64(xdrVec([xdrAccountAddress(KEY_FROM), xdrAccountAddress(KEY_TO)]));
+const DATA = toBase64(xdrMap([
+  ["from", xdrAccountAddress(KEY_FROM)],
+  ["to", xdrAccountAddress(KEY_TO)],
+]));
 
 function makeRaw(
   t1: string,
