@@ -375,7 +375,9 @@ mod issuer_transfer {
         let (issuer, contract_id, client) = setup(&env);
         let new_issuer = Address::generate(&env);
 
+        assert_eq!(client.get_issuer(), issuer);
         client.transfer_issuer(&issuer, &new_issuer);
+        assert_eq!(client.get_issuer(), new_issuer);
 
         assert_eq!(
             env.events().all(),
@@ -456,6 +458,7 @@ mod issuer_transfer {
         let client = JurisdictionFlagClient::new(&env, &contract_id);
         let someone = Address::generate(&env);
 
+        assert_eq!(client.try_get_issuer(), Err(Ok(Error::NotInitialized)));
         assert_eq!(
             client.try_transfer_issuer(&someone, &someone),
             Err(Ok(Error::NotInitialized))
