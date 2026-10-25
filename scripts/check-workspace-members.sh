@@ -41,6 +41,26 @@ is_excluded() {
 }
 
 missing=()
+duplicates=()
+
+# Check for duplicate entries in the workspace members list.
+# Extract member paths from Cargo.toml and look for any that appear more than once.
+while IFS= read -r member; do
+  count=$(grep -c "^\s*\"${member}\",\?\s*$" Cargo.toml || true)
+  if [ "$count" -gt 1 ]; then
+    duplicates+=("$member")
+  fi
+done < <(grep -oP '(?<=")(contracts|examples)/[^"]+(?=")' Cargo.toml | sort -u)
+
+if [ "${#duplicates[@]}" -gt 0 ]; then
+  echo "error: the following crates appear more than once in [workspace] members in Cargo.toml:" >&2
+  for dir in "${duplicates[@]}"; do
+    echo "  - ${dir}" >&2
+  done
+  echo "" >&2
+  echo "Remove the duplicate entries from the 'members' list in Cargo.toml." >&2
+  exit 1
+fi
 
 for dir in contracts/*/ examples/*/; do
   dir="${dir%/}"

@@ -15,46 +15,12 @@
 //! and point clients at it instead of the underlying token — cleared
 //! transfers are forwarded on via a cross-contract call.
 //!
-//! **Roles**: `admin` is the primary privileged role. `add_to_allowlist`
-//! (and `add_to_allowlist_delegated`) are admin-only. An optional
-//! compliance officer, assigned with `set_compliance_officer` and removed
-//! with `revoke_compliance_officer` (both admin-only), may call
-//! `remove_from_allowlist` but can never grant access or manage roles.
-//!
-//! **Delegated actions**: `add_to_allowlist_delegated` lets a relayer submit
-//! an allowlist addition on the admin's behalf, without the admin account
-//! signing the transaction. The admin first registers an ed25519 public key
-//! with `set_delegated_admin_key`. The holder of the matching private key then
-//! signs the payload
-//! `allowlist-delegated-v1:<target>:add_to_allowlist:<nonce>:<expiry>`, where
-//! `<target>` is the address being allowlisted, `<nonce>` is a `u64` and
-//! `<expiry>` is a ledger timestamp in seconds. Each admin has a
-//! replay-protection nonce: a call is rejected with `InvalidNonce` unless
-//! `nonce` is strictly greater than the last accepted one (readable via
-//! `get_delegated_nonce`), and with `ExpiredSignature` once the ledger
-//! timestamp reaches `expiry`. Use this path when the admin key is kept
-//! offline or in cold storage and a relayer pays the fees; use the direct
-//! path (`admin.require_auth()`) whenever the admin can sign the transaction
-//! itself.
-#![no_std]` Soroban contract that wraps an existing
-//! SEP-41 token and only permits `transfer` calls between two addresses that
-//! are both present on an on-chain allowlist.
-//!
-//! **Purpose**: give issuers of permissioned tokens (e.g. RWA or regulated
-//! stablecoins) a drop-in gate that blocks transfers to or from addresses
-//! that haven't cleared KYC/onboarding, without modifying the underlying
-//! token contract's own logic.
-//!
-//! **Composition**: deploy this contract in front of an issuer's real token
-//! and point clients at it instead of the underlying token — cleared
-//! transfers are forwarded on via a cross-contract call.
-//!
-//! **Roles**: there is a single privileged role, `admin`. Both
-//! `add_to_allowlist` and `remove_from_allowlist` are admin-only, and this
-//! contract has no compliance-officer role (that role exists only on
-//! `denylist-gate` and `jurisdiction-flag`). If an "officers may revoke but not
-//! grant" split is ever wanted here, it must be added deliberately, with
-//! `add_to_allowlist` staying admin-only.
+//! **Security boundary**: this wrapper cannot prevent callers from invoking
+//! the underlying token directly. That token must itself restrict transfers to
+//! calls from this wrapper, or the architecture must keep all underlying
+//! tokens in wrapper-controlled custody and prevent direct holder transfers.
+//! SAC `AUTH_REQUIRED` and `AUTH_REVOCABLE` flags alone do not restrict which
+//! contract may call `transfer`; they authorize or revoke accounts.
 #![no_std]
 
 extern crate alloc;
@@ -86,6 +52,7 @@ enum DataKey {
     DelegatedAdminPubKey,
     /// Last accepted delegated-action nonce for an admin. Persistent storage.
     DelegatedNonce(Address),
+    PendingUpgrade,
 }
 
 #[contractevent]
@@ -136,6 +103,17 @@ pub struct Metadata {
     pub admin: Address,
 }
 
+/// Delayed upgrade proposal state.
+#[contracttype]
+#[derive(Clone)]
+pub struct UpgradeState {
+    pub new_wasm: BytesN<32>,
+    pub activated_at: u64,
+}
+
+/// Current on-chain schema version for this contract instance.
+pub const SCHEMA_VERSION: u32 = 1;
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -153,6 +131,8 @@ pub enum Error {
     InvalidSignature = 9,
     InvalidNonce = 10,
     ExpiredSignature = 11,
+    /// `commit_upgrade` called with no pending upgrade, or before `activated_at`.
+    UpgradeNotReady = 12,
 }
 
 #[contract]
@@ -278,10 +258,6 @@ impl AllowlistToken {
             Ok(_) => {}
             Err(_) => return Err(Error::NotAuthorized),
         }
-
-        env.storage()
-            .persistent()
-            .set(&DataKey::DelegatedNonce(admin), &nonce);
         let key = DataKey::Allowed(address.clone());
         env.storage().persistent().set(&key, &true);
         env.storage().persistent().extend_ttl(
@@ -460,11 +436,9 @@ impl AllowlistToken {
 
     /// Returns true if `address` is currently allowlisted.
     ///
-    /// An entry whose `expiration_ledger` has passed (current ledger sequence
-    /// is greater than it) is treated as not allowlisted, even though it has
-    /// not been explicitly removed.
-    ///
-    /// Not affected by pause state — reads always succeed.
+    /// Not affected by pause state — reads always succeed. This view does not
+    /// extend the entry's TTL; transfer checks refresh existing entries when
+    /// their remaining TTL falls below the configured threshold.
     pub fn is_allowed(env: Env, address: Address) -> bool {
         let entry: Option<AllowlistEntry> =
             env.storage().persistent().get(&DataKey::Allowed(address));
@@ -545,7 +519,9 @@ impl AllowlistToken {
     /// Transfer `amount` of the underlying token from `from` to `to`.
     ///
     /// Returns `Ok(false)` without forwarding if either party is not
-    /// allowlisted, emitting a `Blocked` event for auditability.
+    /// allowlisted, emitting a `Blocked` event for auditability. Checking an
+    /// existing allowlist entry extends its TTL when it falls below the
+    /// configured threshold.
     pub fn transfer(env: Env, from: Address, to: Address, amount: i128) -> Result<bool, Error> {
         if amount < 0 {
             return Err(Error::InvalidInput);
@@ -557,9 +533,9 @@ impl AllowlistToken {
 
         from.require_auth();
 
-        if !Self::is_allowed(env.clone(), from.clone())
-            || !Self::is_allowed(env.clone(), to.clone())
-        {
+        let from_allowed = Self::is_allowed_and_extend_ttl(&env, from.clone());
+        let to_allowed = Self::is_allowed_and_extend_ttl(&env, to.clone());
+        if !from_allowed || !to_allowed {
             Blocked { from, to, amount }.publish(&env);
             return Ok(false);
         }
@@ -595,25 +571,15 @@ impl AllowlistToken {
         Ok(())
     }
 
-    /// Checks that `caller` is either the admin or the compliance officer.
-    fn require_compliance_authority(env: &Env, caller: &Address) -> Result<(), Error> {
-        caller.require_auth();
-        let stored_admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .ok_or(Error::NotInitialized)?;
-        if stored_admin == *caller {
-            return Ok(());
-        }
-        if let Some(officer) = env
-            .storage()
-            .instance()
-            .get::<DataKey, Address>(&DataKey::ComplianceOfficer)
-        {
-            if officer == *caller {
-                return Ok(());
-            }
+    fn is_allowed_and_extend_ttl(env: &Env, address: Address) -> bool {
+        let key = DataKey::Allowed(address);
+        let allowed = env.storage().persistent().get(&key).unwrap_or(false);
+        if allowed {
+            env.storage().persistent().extend_ttl(
+                &key,
+                ALLOWED_TTL_THRESHOLD,
+                ALLOWED_TTL_EXTEND_TO,
+            );
         }
         Err(Error::NotAuthorized)
     }

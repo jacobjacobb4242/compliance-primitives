@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **circuit-breaker**: Guardian set for faster incident response. Admin-managed
+  `add_guardian` / `remove_guardian` / `is_guardian`; guardians can call
+  `freeze`, while `unfreeze` remains admin-only. `Frozen` event topic renamed
+  from `admin` to `caller`.
 - **compliance-aggregator**: Admin-gated `upgrade(admin, new_wasm_hash)`
   entrypoint with an `UpgradePerformed` event, a migration test that
   deploys, writes state, upgrades, and verifies state is intact and callable,
