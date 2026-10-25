@@ -36,6 +36,27 @@
 //! offline or in cold storage and a relayer pays the fees; use the direct
 //! path (`admin.require_auth()`) whenever the admin can sign the transaction
 //! itself.
+//! `allowlist-token` is a Soroban contract that wraps an existing
+//! SEP-41 token and only permits `transfer` calls between two addresses that
+//! are both present on an on-chain allowlist.
+//!
+//! **Purpose**: give issuers of permissioned tokens (e.g. RWA or regulated
+//! stablecoins) a drop-in gate that blocks transfers to or from addresses
+//! that haven't cleared KYC/onboarding, without modifying the underlying
+//! token contract's own logic.
+//!
+//! **Composition**: deploy this contract in front of an issuer's real token
+//! and point clients at it instead of the underlying token — cleared
+//! transfers are forwarded on via a cross-contract call.
+//!
+//! **Roles**: there is a single privileged role, `admin`. Both
+//! `add_to_allowlist` and `remove_from_allowlist` are admin-only, and this
+//! contract has no compliance-officer role (that role exists only on
+//! `denylist-gate` and `jurisdiction-flag`). If an "officers may revoke but not
+//! grant" split is ever wanted here, it must be added deliberately, with
+//! `add_to_allowlist` staying admin-only.
+#![no_std]
+
 extern crate alloc;
 
 use soroban_sdk::{
@@ -104,6 +125,35 @@ pub struct AdminTransferred {
     pub old_admin: Address,
     #[topic]
     pub new_admin: Address,
+}
+
+#[contractevent]
+pub struct AdminProposed {
+    #[topic]
+    pub current: Address,
+    #[topic]
+    pub proposed: Address,
+}
+
+#[contractevent]
+pub struct UpgradeProposed {
+    #[topic]
+    pub admin: Address,
+    pub new_wasm: BytesN<32>,
+    pub activated_at: u64,
+}
+
+#[contractevent]
+pub struct UpgradeCancelled {
+    #[topic]
+    pub admin: Address,
+}
+
+#[contractevent]
+pub struct UpgradeCommitted {
+    #[topic]
+    pub admin: Address,
+    pub new_wasm: BytesN<32>,
 }
 
 #[contractevent]
@@ -411,6 +461,11 @@ impl AllowlistToken {
         env.storage()
             .instance()
             .set(&DataKey::PendingAdmin, &new_admin);
+        AdminProposed {
+            current: current_admin,
+            proposed: new_admin,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -486,13 +541,17 @@ impl AllowlistToken {
             return Err(Error::UpgradeDelayTooShort);
         }
         let state = UpgradeState {
-            new_wasm,
+            new_wasm: new_wasm.clone(),
             activated_at: u64::from(env.ledger().sequence())
                 .saturating_add(delay_ledgers as u64),
         };
         env.storage().instance().set(&DataKey::PendingUpgrade, &state);
-        env.events()
-            .publish((soroban_sdk::symbol_short!("upgprop"),), (admin, delay_ledgers));
+        UpgradeProposed {
+            admin,
+            new_wasm,
+            activated_at: state.activated_at,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -510,10 +569,14 @@ impl AllowlistToken {
         if u64::from(env.ledger().sequence()) < state.activated_at {
             return Err(Error::UpgradeNotReady);
         }
-        env.deployer().update_current_contract_wasm(state.new_wasm);
+        env.deployer()
+            .update_current_contract_wasm(state.new_wasm.clone());
         env.storage().instance().remove(&DataKey::PendingUpgrade);
-        env.events()
-            .publish((soroban_sdk::symbol_short!("upgcommit"),), (admin,));
+        UpgradeCommitted {
+            admin,
+            new_wasm: state.new_wasm,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -521,6 +584,7 @@ impl AllowlistToken {
     pub fn cancel_upgrade(env: Env, admin: Address) -> Result<(), Error> {
         Self::require_admin(&env, &admin)?;
         env.storage().instance().remove(&DataKey::PendingUpgrade);
+        UpgradeCancelled { admin }.publish(&env);
         Ok(())
     }
 

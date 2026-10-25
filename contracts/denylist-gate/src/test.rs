@@ -282,6 +282,76 @@ fn test_remove_multiple_from_denylist_removes_all_and_emits_events() {
 }
 
 #[test]
+fn test_proposal_lifecycle_events_include_payloads() {
+    let env = Env::default();
+    let (admin, contract_id, client) = setup(&env);
+    let proposed_admin = Address::generate(&env);
+    let new_wasm = soroban_sdk::BytesN::from_array(&env, &[7; 32]);
+    let activated_at = u64::from(env.ledger().sequence()) + 10;
+
+    client.propose_admin(&admin, &proposed_admin);
+    client.propose_upgrade(&admin, &new_wasm, &10);
+
+    compliance_test_trace::assert_events_eq(
+        &env,
+        &env.events().all(),
+        &vec![
+            &env,
+            (
+                contract_id.clone(),
+                (
+                    Symbol::new(&env, "admin_proposed"),
+                    admin.clone(),
+                    proposed_admin,
+                )
+                    .into_val(&env),
+                Map::<Symbol, Val>::new(&env).into_val(&env),
+            ),
+            (
+                contract_id,
+                (Symbol::new(&env, "upgrade_proposed"), admin.clone()).into_val(&env),
+                Map::<Symbol, Val>::from_array(
+                    &env,
+                    [
+                        (Symbol::new(&env, "activated_at"), activated_at.into_val(&env)),
+                        (Symbol::new(&env, "new_wasm"), new_wasm.into_val(&env)),
+                    ],
+                )
+                .into_val(&env),
+            ),
+        ],
+    );
+}
+
+#[test]
+fn test_cancel_events_are_emitted_for_pending_proposals() {
+    let env = Env::default();
+    let (admin, contract_id, client) = setup(&env);
+    let proposed_admin = Address::generate(&env);
+    let new_wasm = soroban_sdk::BytesN::from_array(&env, &[9; 32]);
+    client.propose_admin(&admin, &proposed_admin);
+    client.propose_upgrade(&admin, &new_wasm, &10);
+
+    client.cancel_admin_proposal(&admin);
+    client.cancel_upgrade(&admin);
+
+    let events = env.events().all();
+    let (_, admin_topics, admin_data) = events.get_unchecked(3);
+    assert_eq!(
+        admin_topics,
+        (Symbol::new(&env, "admin_proposal_cancelled"), admin.clone()).into_val(&env)
+    );
+    assert_eq!(admin_data, Map::<Symbol, Val>::new(&env).into_val(&env));
+    let (_, upgrade_topics, upgrade_data) = events.get_unchecked(4);
+    assert_eq!(
+        upgrade_topics,
+        (Symbol::new(&env, "upgrade_cancelled"), admin).into_val(&env)
+    );
+    assert_eq!(upgrade_data, Map::<Symbol, Val>::new(&env).into_val(&env));
+    assert_eq!(events.get_unchecked(3).0, contract_id);
+}
+
+#[test]
 fn test_remove_multiple_from_denylist_rejects_non_admin() {
     let env = Env::default();
     let (_admin, _contract_id, client) = setup(&env);

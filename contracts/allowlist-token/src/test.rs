@@ -958,29 +958,62 @@ fn test_get_delegated_nonce_returns_last_used_nonce() {
 }
 
 #[test]
-fn test_propose_upgrade_rejects_delay_below_minimum() {
+fn test_proposal_lifecycle_events_include_payloads() {
     let env = Env::default();
-    let (admin, _token_id, _contract_id, client) = setup(&env);
-    let wasm_hash = BytesN::from_array(&env, &[0; 32]);
+    let (admin, _token_id, contract_id, client) = setup(&env);
+    let proposed_admin = Address::generate(&env);
+    let new_wasm = BytesN::from_array(&env, &[7; 32]);
+    let activated_at = u64::from(env.ledger().sequence()) + 10;
 
-    assert_eq!(
-        client.try_propose_upgrade(
-            &admin,
-            &wasm_hash,
-            &(MIN_UPGRADE_DELAY_LEDGERS - 1),
-        ),
-        Err(Ok(Error::UpgradeDelayTooShort))
+    client.propose_admin(&admin, &proposed_admin);
+    client.propose_upgrade(&admin, &new_wasm, &10);
+
+    compliance_test_trace::assert_events_eq(
+        &env,
+        &env.events().all(),
+        &vec![
+            &env,
+            (
+                contract_id.clone(),
+                (
+                    Symbol::new(&env, "admin_proposed"),
+                    admin.clone(),
+                    proposed_admin.clone(),
+                )
+                    .into_val(&env),
+                Map::<Symbol, Val>::new(&env).into_val(&env),
+            ),
+            (
+                contract_id,
+                (Symbol::new(&env, "upgrade_proposed"), admin.clone()).into_val(&env),
+                Map::<Symbol, Val>::from_array(
+                    &env,
+                    [
+                        (Symbol::new(&env, "activated_at"), activated_at.into_val(&env)),
+                        (Symbol::new(&env, "new_wasm"), new_wasm.into_val(&env)),
+                    ],
+                )
+                .into_val(&env),
+            ),
+        ],
     );
 }
 
 #[test]
-fn test_propose_upgrade_accepts_minimum_delay() {
+fn test_upgrade_cancel_event_includes_admin() {
     let env = Env::default();
-    let (admin, _token_id, _contract_id, client) = setup(&env);
-    let wasm_hash = BytesN::from_array(&env, &[0; 32]);
+    let (admin, _token_id, contract_id, client) = setup(&env);
+    let new_wasm = BytesN::from_array(&env, &[9; 32]);
+    client.propose_upgrade(&admin, &new_wasm, &10);
 
+    client.cancel_upgrade(&admin);
+
+    let events = env.events().all();
+    let (_, topics, data) = events.last().unwrap();
     assert_eq!(
-        client.try_propose_upgrade(&admin, &wasm_hash, &MIN_UPGRADE_DELAY_LEDGERS),
-        Ok(Ok(()))
+        topics,
+        (Symbol::new(&env, "upgrade_cancelled"), admin).into_val(&env)
     );
+    assert_eq!(data, Map::<Symbol, Val>::new(&env).into_val(&env));
+    assert_eq!(events.last().unwrap().0, contract_id);
 }

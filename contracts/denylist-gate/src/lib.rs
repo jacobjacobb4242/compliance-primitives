@@ -188,6 +188,41 @@ pub struct AdminTransferred {
 }
 
 #[contractevent]
+pub struct AdminProposed {
+    #[topic]
+    pub current: Address,
+    #[topic]
+    pub proposed: Address,
+}
+
+#[contractevent]
+pub struct AdminProposalCancelled {
+    #[topic]
+    pub current: Address,
+}
+
+#[contractevent]
+pub struct UpgradeProposed {
+    #[topic]
+    pub admin: Address,
+    pub new_wasm: BytesN<32>,
+    pub activated_at: u64,
+}
+
+#[contractevent]
+pub struct UpgradeCancelled {
+    #[topic]
+    pub admin: Address,
+}
+
+#[contractevent]
+pub struct UpgradeCommitted {
+    #[topic]
+    pub admin: Address,
+    pub new_wasm: BytesN<32>,
+}
+
+#[contractevent]
 pub struct Paused {
     #[topic]
     pub admin: Address,
@@ -321,6 +356,11 @@ impl DenylistGate {
     pub fn propose_admin(env: Env, current_admin: Address, new_admin: Address) -> Result<(), Error> {
         Self::require_admin(&env, &current_admin)?;
         env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
+        AdminProposed {
+            current: current_admin,
+            proposed: new_admin,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -353,6 +393,10 @@ impl DenylistGate {
             return Err(Error::NoPendingAdmin);
         }
         env.storage().instance().remove(&DataKey::PendingAdmin);
+        AdminProposalCancelled {
+            current: current_admin,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -417,13 +461,17 @@ impl DenylistGate {
             return Err(Error::UpgradeDelayTooShort);
         }
         let state = UpgradeState {
-            new_wasm,
+            new_wasm: new_wasm.clone(),
             activated_at: u64::from(env.ledger().sequence())
                 .saturating_add(delay_ledgers as u64),
         };
         env.storage().instance().set(&DataKey::PendingUpgrade, &state);
-        env.events()
-            .publish((soroban_sdk::symbol_short!("upgprop"),), (admin, delay_ledgers));
+        UpgradeProposed {
+            admin,
+            new_wasm,
+            activated_at: state.activated_at,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -441,10 +489,14 @@ impl DenylistGate {
         if u64::from(env.ledger().sequence()) < state.activated_at {
             return Err(Error::UpgradeNotReady);
         }
-        env.deployer().update_current_contract_wasm(state.new_wasm);
+        env.deployer()
+            .update_current_contract_wasm(state.new_wasm.clone());
         env.storage().instance().remove(&DataKey::PendingUpgrade);
-        env.events()
-            .publish((soroban_sdk::symbol_short!("upgcommit"),), (admin,));
+        UpgradeCommitted {
+            admin,
+            new_wasm: state.new_wasm,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -452,6 +504,7 @@ impl DenylistGate {
     pub fn cancel_upgrade(env: Env, admin: Address) -> Result<(), Error> {
         Self::require_admin(&env, &admin)?;
         env.storage().instance().remove(&DataKey::PendingUpgrade);
+        UpgradeCancelled { admin }.publish(&env);
         Ok(())
     }
 
