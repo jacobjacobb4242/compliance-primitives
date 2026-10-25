@@ -37,10 +37,10 @@ use soroban_sdk::{
 /// Length in bytes of an ISO 3166-1 alpha-2 code.
 const JURISDICTION_CODE_LEN: u32 = 2;
 
-/// Extend persistent jurisdiction entries when TTL drops below this many ledgers.
-const TTL_THRESHOLD: u32 = 1_000;
-/// Target TTL (in ledgers) after extension.
-const TTL_EXTEND_TO: u32 = 5_000;
+/// Extend persistent jurisdiction entries below 120,960 ledgers (~7 days).
+const TTL_THRESHOLD: u32 = 120_960;
+/// Target 1,555,200 ledgers (~90 days) after extension.
+const TTL_EXTEND_TO: u32 = 1_555_200;
 
 /// Maximum number of entries accepted by `set_multiple_jurisdictions` in a
 /// single call. Keeps transaction costs bounded and prevents resource
