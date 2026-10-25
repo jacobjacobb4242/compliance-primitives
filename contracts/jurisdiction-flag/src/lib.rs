@@ -370,6 +370,7 @@ impl JurisdictionFlag {
         code: String,
     ) -> Result<(), Error> {
         Self::require_compliance_authority(&env, &issuer)?;
+        Self::reject_if_paused(&env)?;
         Self::validate_jurisdiction_code(&code)?;
 
         let mut codes = Vec::new(&env);
@@ -406,14 +407,7 @@ impl JurisdictionFlag {
         entries: Vec<(Address, String)>,
     ) -> Result<(), Error> {
         Self::require_compliance_authority(&env, &caller)?;
-        let paused: bool = env
-            .storage()
-            .instance()
-            .get(&DataKey::Paused)
-            .unwrap_or(false);
-        if paused {
-            return Err(Error::ContractPaused);
-        }
+        Self::reject_if_paused(&env)?;
 
         if entries.is_empty() || entries.len() > MAX_BATCH_SIZE {
             return Err(Error::InvalidInput);
@@ -448,6 +442,7 @@ impl JurisdictionFlag {
         valid_until: u32,
     ) -> Result<(), Error> {
         Self::require_compliance_authority(&env, &issuer)?;
+        Self::reject_if_paused(&env)?;
         Self::validate_jurisdiction_code(&code)?;
 
         let mut codes = Vec::new(&env);
@@ -475,6 +470,7 @@ impl JurisdictionFlag {
         code: String,
     ) -> Result<(), Error> {
         Self::require_compliance_authority(&env, &issuer)?;
+        Self::reject_if_paused(&env)?;
         Self::validate_jurisdiction_code(&code)?;
 
         let mut codes = Self::load_jurisdictions(&env, &address);
@@ -498,6 +494,7 @@ impl JurisdictionFlag {
         code: String,
     ) -> Result<(), Error> {
         Self::require_issuer(&env, &issuer)?;
+        Self::reject_if_paused(&env)?;
 
         let mut remaining = Vec::new(&env);
         for existing in Self::load_jurisdictions(&env, &address).iter() {
@@ -526,6 +523,7 @@ impl JurisdictionFlag {
         addresses: Vec<Address>,
     ) -> Result<(), Error> {
         Self::require_issuer(&env, &issuer)?;
+        Self::reject_if_paused(&env)?;
         for address in addresses.iter() {
             Self::store_jurisdictions(&env, &address, &Vec::new(&env));
             JurisdictionRemoved { address }.publish(&env);
@@ -595,6 +593,18 @@ impl JurisdictionFlag {
     // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------
+
+    fn reject_if_paused(env: &Env) -> Result<(), Error> {
+        if env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+        {
+            return Err(Error::ContractPaused);
+        }
+        Ok(())
+    }
 
     /// Upgrade the contract WASM. Issuer-only.
     ///
