@@ -311,6 +311,31 @@ fn test_non_admin_allowlist_mutations_rejected_end_to_end() {
 }
 
 #[test]
+fn test_pause_blocks_allowlist_mutations_but_allows_admin_rotation() {
+    let env = Env::default();
+    let (admin, _token_id, _contract_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+    let next_admin = Address::generate(&env);
+
+    client.add_to_allowlist(&admin, &alice);
+    client.pause(&admin);
+
+    assert_eq!(
+        client.try_add_to_allowlist(&admin, &Address::generate(&env)),
+        Err(Ok(Error::ContractPaused))
+    );
+    assert_eq!(
+        client.try_remove_from_allowlist(&admin, &alice),
+        Err(Ok(Error::ContractPaused))
+    );
+    assert!(client.is_allowed(&alice));
+
+    client.propose_admin(&admin, &next_admin);
+    client.accept_admin(&next_admin);
+    assert_eq!(client.get_admin(), next_admin);
+}
+
+#[test]
 fn test_delegated_add_to_allowlist_succeeds() {
     let env = Env::default();
     let (admin, _token_id, _contract_id, client) = setup(&env);
@@ -561,6 +586,42 @@ fn test_add_to_allowlist_extends_persistent_ttl() {
     });
 }
 
+#[test]
+fn test_transfers_keep_allowlist_entries_live_past_original_ttl() {
+    use soroban_sdk::testutils::storage::Persistent as _;
+
+    let env = Env::default();
+    env.ledger().with_mut(|li| {
+        li.sequence_number = 100_000;
+        li.min_persistent_entry_ttl = 500;
+        li.max_entry_ttl = 6_311_520;
+    });
+
+    let (admin, _token_id, contract_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    client.add_to_allowlist(&admin, &alice);
+    client.add_to_allowlist(&admin, &bob);
+
+    let transfer_interval = ALLOWED_TTL_EXTEND_TO - ALLOWED_TTL_THRESHOLD + 1;
+    for _ in 0..3 {
+        env.ledger().with_mut(|li| li.sequence_number += transfer_interval);
+        assert!(client.transfer(&alice, &bob, &1));
+        env.as_contract(&contract_id, || {
+            for address in [&alice, &bob] {
+                let ttl = env
+                    .storage()
+                    .persistent()
+                    .get_ttl(&DataKey::Allowed(address.clone()));
+                assert_eq!(ttl, ALLOWED_TTL_EXTEND_TO);
+            }
+        });
+    }
+
+    assert!(client.is_allowed(&alice));
+    assert!(client.is_allowed(&bob));
+}
+
 /// Property: after any sequence of add/remove on a fixed address pool,
 /// `is_allowed(addr)` matches whether the last op touching `addr` was an add.
 #[test]
@@ -730,20 +791,66 @@ fn test_transfer_blocked_while_paused_and_succeeds_after_unpause() {
     assert_eq!(token.last_transfer(), Some((alice, bob, 10)));
 }
 
+/// Pause blocks add/remove so a paused contract's allowlist stays frozen.
+/// Admin rotation and unpause remain available (regression test for #583).
 #[test]
-fn test_pause_does_not_block_allowlist_mutations() {
+fn test_pause_blocks_add_to_allowlist() {
     let env = Env::default();
     let (admin, _token_id, _contract_id, client) = setup(&env);
-    let alice = Address::generate(&env);
     let bob = Address::generate(&env);
-    client.add_to_allowlist(&admin, &alice);
 
     client.pause(&admin);
 
-    client.add_to_allowlist(&admin, &bob);
+    assert_eq!(
+        client.try_add_to_allowlist(&admin, &bob, &None),
+        Err(Ok(Error::ContractPaused))
+    );
+    assert!(!client.is_allowed(&bob));
+}
+
+#[test]
+fn test_pause_blocks_remove_from_allowlist() {
+    let env = Env::default();
+    let (admin, _token_id, _contract_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+    client.add_to_allowlist(&admin, &alice, &None);
+
+    client.pause(&admin);
+
+    assert_eq!(
+        client.try_remove_from_allowlist(&admin, &alice),
+        Err(Ok(Error::ContractPaused))
+    );
+    // Entry must still be there — the allowlist must stay frozen.
+    assert!(client.is_allowed(&alice));
+}
+
+#[test]
+fn test_unpause_restores_allowlist_mutations() {
+    let env = Env::default();
+    let (admin, _token_id, _contract_id, client) = setup(&env);
+    let bob = Address::generate(&env);
+
+    client.pause(&admin);
+    client.unpause(&admin);
+
+    // After unpause, mutations work again.
+    client.add_to_allowlist(&admin, &bob, &None);
     assert!(client.is_allowed(&bob));
-    client.remove_from_allowlist(&admin, &alice);
-    assert!(!client.is_allowed(&alice));
+}
+
+#[test]
+fn test_admin_rotation_works_while_paused() {
+    let env = Env::default();
+    let (admin, _token_id, _contract_id, client) = setup(&env);
+    let new_admin = Address::generate(&env);
+
+    client.pause(&admin);
+    // propose_admin / accept_admin must succeed while paused so a compromised
+    // key can always be rotated out.
+    client.propose_admin(&admin, &new_admin);
+    client.accept_admin(&new_admin);
+    assert_eq!(client.get_admin(), new_admin);
 }
 
 #[test]

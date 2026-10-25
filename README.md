@@ -46,6 +46,7 @@ deployment and walkthrough.
 Each example under `/examples` demonstrates a different composition pattern:
 
 - **[circuit-breaker-policy-engine](./examples/circuit-breaker-policy-engine)** — wires `circuit-breaker` as a pre-check before `policy-engine` evaluation
+- **[compliance-integration-flow](./examples/compliance-integration-flow)** — combines jurisdiction policy evaluation, a multisig-governed circuit breaker, and audit logging
 - **[denylist-gate-consumer](./examples/denylist-gate-consumer)** — minimal token calling `denylist-gate` and `circuit-breaker` before transfers
 - **[denylist-gate-sep41](./examples/denylist-gate-sep41)** — `denylist-gate` integration for SEP-41 anchor compliance
 - **[jurisdiction-flag-consumer](./examples/jurisdiction-flag-consumer)** — token enforcing jurisdiction-based transfer restrictions
@@ -132,7 +133,13 @@ before permitting a transaction. See
 a worked example of that pattern. `allowlist-token` is the one exception —
 it's a thin wrapper you can deploy in front of an existing SEP-41 token —
 but even it delegates the real transfer to the underlying token contract
-rather than reimplementing token logic itself.
+rather than reimplementing token logic itself. The wrapper cannot stop a holder
+from calling that underlying contract directly: the underlying token must
+enforce wrapper-only transfers, or the asset must use a custody design that
+prevents holders from transferring it outside the wrapper. SAC
+`AUTH_REQUIRED`/`AUTH_REVOCABLE` flags alone do not enforce a caller-contract
+restriction. See the [`allowlist-token` module documentation](./contracts/allowlist-token/src/lib.rs)
+and [threat model](./docs/THREAT_MODEL.md#14-underlying-token-bypass).
 
 ## Choosing which primitives to compose
 

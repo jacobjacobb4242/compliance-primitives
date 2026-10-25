@@ -57,6 +57,20 @@ not apply. (Confirmed by reading `lib.rs`: all write entry points require `admin
 | A6 | Compromised `admin` adds attacker addresses to the allowlist, enabling illicit transfers of the wrapped asset. | High | Low | Bounded by `pause` (#84/#85) + two-step admin recovery (#74/#75/#76). Once #74/#75/#76 and #84/#85 land, a new admin can be proposed and the contract paused within one ledger. |
 | A7 | Compromised `admin` calls `pause` permanently to extort/DoS. | Med | Low | Recovery requires admin key rotation (#74/#75/#76); consider a time-locked unpause or guardian (future issue). |
 
+### 1.4 Underlying-token bypass
+
+`allowlist-token` forwards cleared transfers to an underlying SEP-41 token,
+but it cannot prevent a holder from calling that token directly. If the
+underlying contract does not enforce the wrapper as the caller, direct
+transfers bypass the allowlist. For Stellar Asset Contracts,
+`AUTH_REQUIRED` and `AUTH_REVOCABLE` control account authorization and
+revocation; they do not make the wrapper the only contract allowed to call
+`transfer` for an authorized holder.
+
+| ID | Scenario | Sev | Lik | Mitigation |
+|----|----------|-----|-----|------------|
+| A8 | **Underlying-token bypass** — a holder calls the underlying token directly instead of this wrapper, bypassing its allowlist check. | High | High | The underlying token must enforce wrapper-only transfers, or a custody design must prevent holders from transferring underlying balances directly. Client routing to the wrapper alone is not an enforcement boundary. |
+
 ---
 
 ## 2. `denylist-gate`

@@ -24,6 +24,14 @@ wasm. It only depends on them as `dev-dependencies` for tests, and uses
 `is_allowed` — the example token keeps its own balances rather than
 forwarding through `allowlist-token.transfer`.
 
+This is the restricted custom-token pattern: `RwaToken::transfer` checks the
+allowlist, denylist, and jurisdiction gates before mutating its own balances.
+Calling this token's `transfer` directly still runs those checks. It does not
+demonstrate wrapping an unrestricted SEP-41 token; a wrapper deployment must
+also prevent users from transferring the underlying asset directly. SAC
+`AUTH_REQUIRED`/`AUTH_REVOCABLE` flags alone do not provide that caller
+restriction.
+
 ## Build & test
 
 ```sh

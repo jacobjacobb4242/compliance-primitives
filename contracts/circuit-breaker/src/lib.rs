@@ -76,8 +76,7 @@
 //! alongside it and call it after `upgrade`. See `STORAGE_VERSIONING.md`.
 
 use soroban_sdk::{
-    contract, contractclient, contracterror, contractevent, contractimpl, contracttype, Address,
-    BytesN, Env, String, Symbol,
+    contract, contracterror, contractevent, contractimpl, contracttype, Address, Env, String, Vec,
 };
 
 /// Extend the contract's instance storage when its remaining TTL drops below
@@ -94,7 +93,7 @@ enum DataKey {
     Admin,
     Frozen,
     PendingAdmin,
-    AuditLog,
+    Guardians,
 }
 
 /// Version + admin metadata about this contract instance, for tooling that
@@ -109,8 +108,7 @@ pub struct Metadata {
 #[contractevent]
 pub struct Frozen {
     #[topic]
-    pub admin: Address,
-    pub reason: Option<Symbol>,
+    pub caller: Address,
 }
 
 #[contractevent]
@@ -179,39 +177,22 @@ impl CircuitBreaker {
         Ok(())
     }
 
-    /// Configure the optional append-only audit log. Admin-only.
-    pub fn set_audit_log(env: Env, admin: Address, audit_log: Address) -> Result<(), Error> {
-        Self::require_admin(&env, &admin)?;
-        env.storage().instance().set(&DataKey::AuditLog, &audit_log);
-        Ok(())
-    }
-
-    /// Freeze the breaker. `reason` is optional and is emitted in the
-    /// `Frozen` event so observers can tell e.g. maintenance from an incident.
-    pub fn freeze(env: Env, admin: Address, reason: Option<Symbol>) -> Result<(), Error> {
-        Self::require_admin(&env, &admin)?;
-        // Idempotency: if already frozen, skip the write and event so that
-        // indexers and dashboards see exactly one Frozen event per incident,
-        // and freeze-duration metrics remain correct.
-        let already_frozen: bool = env
-            .storage()
-            .instance()
-            .get(&DataKey::Frozen)
-            .unwrap_or(false);
-        if already_frozen {
-            return Ok(());
-        }
+    /// Freeze the breaker. Callable by the admin or any configured guardian,
+    /// so an incident can be halted even when the admin key is unavailable.
+    pub fn freeze(env: Env, caller: Address) -> Result<(), Error> {
+        Self::require_admin_or_guardian(&env, &caller)?;
         env.storage().instance().set(&DataKey::Frozen, &true);
         Self::extend_instance_ttl(&env);
         Frozen {
-            admin: admin.clone(),
-            reason,
+            caller: caller.clone(),
         }
         .publish(&env);
         Self::record_audit(&env, Symbol::new(&env, "freeze"), &admin, "circuit breaker frozen");
         Ok(())
     }
 
+    /// Unfreeze is admin-only: resuming flows is deliberately harder than
+    /// halting them, so a guardian cannot reopen a frozen system.
     pub fn unfreeze(env: Env, admin: Address) -> Result<(), Error> {
         Self::require_admin(&env, &admin)?;
         // Idempotency: if already unfrozen, skip the write and event so that
@@ -264,6 +245,39 @@ impl CircuitBreaker {
             .instance()
             .get(&DataKey::Admin)
             .ok_or(Error::NotInitialized)
+    }
+
+    /// Add `guardian` to the freeze-only set. Admin-only. Adding an existing
+    /// guardian is a no-op.
+    pub fn add_guardian(env: Env, admin: Address, guardian: Address) -> Result<(), Error> {
+        Self::require_admin(&env, &admin)?;
+        let mut guardians = Self::guardians(&env);
+        if !Self::contains(&guardians, &guardian) {
+            guardians.push_back(guardian);
+            env.storage().instance().set(&DataKey::Guardians, &guardians);
+        }
+        Ok(())
+    }
+
+    /// Remove `guardian` from the freeze-only set. Admin-only. Removing a
+    /// non-guardian is a no-op.
+    pub fn remove_guardian(env: Env, admin: Address, guardian: Address) -> Result<(), Error> {
+        Self::require_admin(&env, &admin)?;
+        let guardians = Self::guardians(&env);
+        if Self::contains(&guardians, &guardian) {
+            let mut kept = Vec::new(&env);
+            for g in guardians.iter() {
+                if g != guardian {
+                    kept.push_back(g);
+                }
+            }
+            env.storage().instance().set(&DataKey::Guardians, &kept);
+        }
+        Ok(())
+    }
+
+    pub fn is_guardian(env: Env, address: Address) -> bool {
+        Self::contains(&Self::guardians(&env), &address)
     }
 
     /// Propose a new admin. The current admin remains fully in control
@@ -356,13 +370,30 @@ impl CircuitBreaker {
         })
     }
 
-    /// Refresh the TTL of the contract instance (and therefore of every
-    /// instance-storage entry). See the "Storage and TTL policy" section of
-    /// the module docs.
-    fn extend_instance_ttl(env: &Env) {
+    fn guardians(env: &Env) -> Vec<Address> {
         env.storage()
             .instance()
-            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+            .get(&DataKey::Guardians)
+            .unwrap_or_else(|| Vec::new(env))
+    }
+
+    fn contains(guardians: &Vec<Address>, address: &Address) -> bool {
+        guardians.iter().any(|g| g == *address)
+    }
+
+    /// Requires `caller`'s authorization and that it is either the admin or a
+    /// configured guardian.
+    fn require_admin_or_guardian(env: &Env, caller: &Address) -> Result<(), Error> {
+        caller.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        if stored_admin == *caller || Self::contains(&Self::guardians(env), caller) {
+            return Ok(());
+        }
+        Err(Error::NotAuthorized)
     }
 
     fn require_admin(env: &Env, admin: &Address) -> Result<(), Error> {
