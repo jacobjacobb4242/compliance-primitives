@@ -173,6 +173,14 @@ impl JurisdictionFlag {
         Ok(())
     }
 
+    /// Return the configured issuer address.
+    pub fn get_issuer(env: Env) -> Result<Address, Error> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Issuer)
+            .ok_or(Error::NotInitialized)
+    }
+
     /// Reassign the issuer role to `new_issuer`. Requires auth from
     /// `current_issuer`, which must be the stored issuer.
     ///

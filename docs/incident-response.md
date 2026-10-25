@@ -19,7 +19,8 @@ Before acting, determine which contracts the compromised key controls:
 | `allowlist-token` admin | Can add/remove allowlist entries, pause/unpause, upgrade contract |
 | `denylist-gate` admin | Can add/remove denylist entries, pause/unpause, propose/commit upgrades |
 | `jurisdiction-flag` issuer | Can set/remove jurisdiction codes, pause/unpause, upgrade contract |
-| `circuit-breaker` admin | Can freeze/unfreeze, propose/accept new admin |
+| `circuit-breaker` admin | Can freeze/unfreeze, add/remove guardians, propose/accept new admin |
+| `circuit-breaker` guardian | Can freeze only (cannot unfreeze) |
 | `compliance-aggregator` admin | Can reconfigure which gate/flag/breaker contracts are consulted |
 | `policy-engine` admin | Can add/remove registered checks, set circuit-breaker, upgrade |
 | `multisig-admin` signer | One signer in an M-of-N set; alone cannot act below threshold |

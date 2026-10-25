@@ -62,6 +62,16 @@ function xdrU32(value: number): number[] {
   return [...u32(3), ...u32(value)];
 }
 
+function xdrI128(value: bigint): number[] {
+  const hi = BigInt.asIntN(64, value >> 64n);
+  const lo = BigInt.asUintN(64, value);
+  const i64 = (n: bigint) => [
+    ...u32(Number(BigInt.asUintN(32, n >> 32n))),
+    ...u32(Number(BigInt.asUintN(32, n))),
+  ];
+  return [...u32(10), ...i64(hi), ...i64(lo)];
+}
+
 function xdrVec(values: number[][]): number[] {
   return [...u32(16), ...u32(1), ...u32(values.length), ...values.flat()];
 }
@@ -126,8 +136,9 @@ function buildComplianceEventRaw(opts: {
     ledgerClosedAt = "2025-01-01T00:00:00Z",
   } = opts;
 
-  const topic0 = bytesToBase64(xdrSymbol(kind));
-  const topic1 = bytesToBase64(xdrAccountAddress(subjectKey));
+  const topic0 = bytesToBase64(xdrSymbol("compliance_event"));
+  const topic1 = bytesToBase64(xdrSymbol(kind));
+  const topic2 = bytesToBase64(xdrAccountAddress(subjectKey));
 
   // data = Map { "source": Address(sourceKey), "detail": String(detail) }
   const sourceEntry = [...xdrSymbol("source"), ...xdrAccountAddress(sourceKey)];
@@ -139,7 +150,7 @@ function buildComplianceEventRaw(opts: {
     ledger,
     ledgerClosedAt,
     contractId: CONTRACT_ID,
-    topic: [topic0, topic1],
+    topic: [topic0, topic1, topic2],
     value: dataB64,
     id: "test-id",
     pagingToken: "test-paging-token",
@@ -200,10 +211,10 @@ test("decodes ComplianceEvent with various kind values", () => {
 });
 
 test("does not misidentify AllowAdd as ComplianceEvent", () => {
-  // AllowAdd: topics=[Symbol("AllowAdd"), Address], data=Void
-  const topic0 = bytesToBase64(xdrSymbol("AllowAdd"));
+  // AllowAdd: topics=[Symbol("allow_add"), Address], data=empty map
+  const topic0 = bytesToBase64(xdrSymbol("allow_add"));
   const topic1 = bytesToBase64(xdrAccountAddress(SUBJECT_KEY));
-  const dataB64 = bytesToBase64(u32(1)); // ScVal::Void
+  const dataB64 = bytesToBase64(xdrMap([]));
 
   const raw: RawSorobanEvent = {
     type: "contract",
@@ -242,11 +253,11 @@ test("returns null for events with fewer than 2 topics", () => {
   assert.strictEqual(result, null, "single-topic event should decode to null");
 });
 
-test("does not misidentify DenyAdd (Symbol+Address+Void data) as ComplianceEvent", () => {
-  // DenyAdd: topics=[Symbol("DenyAdd"), Address], data=Void — Void is not a Map
-  const topic0 = bytesToBase64(xdrSymbol("DenyAdd"));
+test("does not misidentify DenyAdd as ComplianceEvent", () => {
+  // DenyAdd: topics=[Symbol("deny_add"), Address], data=empty map
+  const topic0 = bytesToBase64(xdrSymbol("deny_add"));
   const topic1 = bytesToBase64(xdrAccountAddress(SUBJECT_KEY));
-  const dataB64 = bytesToBase64(u32(1)); // ScVal::Void
+  const dataB64 = bytesToBase64(xdrMap([]));
 
   const raw: RawSorobanEvent = {
     type: "contract",
@@ -290,9 +301,12 @@ function buildNamedEventRaw(name: string, topics: number[][], data: number[]): R
 
 test("decodes policy-engine PolicyResult fields", () => {
   const raw = buildNamedEventRaw(
-    "PolicyResult",
+    "policy_result",
     [xdrBool(true)],
-    xdrVec([xdrAccountAddress(SUBJECT_KEY), xdrAccountAddress(SOURCE_KEY)])
+    xdrMap([
+      [...xdrSymbol("from"), ...xdrAccountAddress(SUBJECT_KEY)],
+      [...xdrSymbol("to"), ...xdrAccountAddress(SOURCE_KEY)],
+    ])
   );
   const result = decodeEvent(raw);
 
@@ -302,6 +316,59 @@ test("decodes policy-engine PolicyResult fields", () => {
   assert.match(result!.policyFrom!, /^G/);
   assert.match(result!.policyTo!, /^G/);
   assert.equal(result!.address, null);
+});
+
+test("decodes Blocked amount and JurisdictionSet code from struct maps", () => {
+  const blocked = decodeEvent(buildNamedEventRaw(
+    "blocked",
+    [xdrAccountAddress(SUBJECT_KEY), xdrAccountAddress(SOURCE_KEY)],
+    xdrMap([[...xdrSymbol("amount"), ...xdrI128(100n)]])
+  ));
+  assert.notEqual(blocked, null);
+  assert.equal(blocked!.eventType, "Blocked");
+  assert.equal(blocked!.amount, "100");
+  assert.match(blocked!.address!, /^G/);
+  assert.match(blocked!.addressTo!, /^G/);
+
+  const jurisdiction = decodeEvent(buildNamedEventRaw(
+    "jurisdiction_set",
+    [xdrAccountAddress(SUBJECT_KEY)],
+    xdrMap([[...xdrSymbol("code"), ...xdrStr("US")]])
+  ));
+  assert.notEqual(jurisdiction, null);
+  assert.equal(jurisdiction!.eventType, "JurisdictionSet");
+  assert.equal(jurisdiction!.jurisdiction, "US");
+});
+
+test("decodes snake_case contract event names and prefixed topics", () => {
+  for (const [name, eventType] of [
+    ["frozen", "Frozen"],
+    ["unfrozen", "Unfrozen"],
+  ]) {
+    const result = decodeEvent(buildNamedEventRaw(
+      name,
+      [xdrAccountAddress(SUBJECT_KEY)],
+      xdrMap([])
+    ));
+    assert.notEqual(result, null);
+    assert.equal(result!.eventType, eventType);
+  }
+
+  for (const [name, eventType] of [
+    ["admin_set", "AdminSet"],
+    ["denylist_gate_set", "DenylistGateSet"],
+    ["jurisdiction_flag_set", "JurisdictionFlagSet"],
+    ["circuit_breaker_set", "CircuitBreakerSet"],
+  ]) {
+    const result = decodeEvent(buildNamedEventRaw(
+      name,
+      [xdrAccountAddress(SUBJECT_KEY)],
+      xdrMap([])
+    ));
+    assert.notEqual(result, null);
+    assert.equal(result!.eventType, eventType);
+    assert.match(result!.address!, /^G/);
+  }
 });
 
 test("decodes multisig-admin signer and threshold events", () => {

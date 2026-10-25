@@ -32,12 +32,32 @@ function makeRawEvent(
  * Manually crafted XDR blobs for testing.
  * These are minimal valid XDR ScVal encodings.
  */
-const XDR_SYMBOL_ALLOWADD = "AAAADwAAAAhBbGxvd0FkZA=="; // Symbol("AllowAdd")
-const XDR_SYMBOL_ALLOWREMOVE = "AAAADwAAAAtBbGxvd1JlbW92ZQA="; // Symbol("AllowRemove")
-const XDR_SYMBOL_DENYADD = "AAAADwAAAAdEZW55QWRkAA=="; // Symbol("DenyAdd")
-const XDR_SYMBOL_DENYREMOVE = "AAAADwAAAApEZW55UmVtb3ZlAAA="; // Symbol("DenyRemove")
-const XDR_SYMBOL_BLOCKED = "AAAADwAAAAdCbG9ja2VkAA=="; // Symbol("Blocked")
-const XDR_SYMBOL_JURISDICTIONSET = "AAAADwAAAA9KdXJpc2RpY3Rpb25TZXQA"; // Symbol("JurisdictionSet")
+function xdrU32(value: number): number[] {
+  return [(value >>> 24) & 0xff, (value >>> 16) & 0xff, (value >>> 8) & 0xff, value & 0xff];
+}
+
+function xdrSymbol(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  const padding = (4 - (bytes.length % 4)) % 4;
+  return Buffer.from([
+    ...xdrU32(15), ...xdrU32(bytes.length), ...bytes, ...new Array(padding).fill(0),
+  ]).toString("base64");
+}
+
+function xdrMapField(key: string, encodedValue: string): string {
+  return Buffer.concat([
+    Buffer.from([...xdrU32(17), ...xdrU32(1), ...xdrU32(1)]),
+    Buffer.from(xdrSymbol(key), "base64"),
+    Buffer.from(encodedValue, "base64"),
+  ]).toString("base64");
+}
+
+const XDR_SYMBOL_ALLOWADD = xdrSymbol("allow_add");
+const XDR_SYMBOL_ALLOWREMOVE = xdrSymbol("allow_remove");
+const XDR_SYMBOL_DENYADD = xdrSymbol("deny_add");
+const XDR_SYMBOL_DENYREMOVE = xdrSymbol("deny_remove");
+const XDR_SYMBOL_BLOCKED = xdrSymbol("blocked");
+const XDR_SYMBOL_JURISDICTIONSET = xdrSymbol("jurisdiction_set");
 
 // Sample G-address (account): 32 zero-byte ED25519 public key
 const XDR_ADDRESS_ACCOUNT =
@@ -50,6 +70,8 @@ const XDR_ADDRESS_CONTRACT =
 const XDR_VOID = "AAAAAQ=="; // ScVal::Void
 const XDR_STRING_US = "AAAADgAAAAJVUwAA"; // ScVal::String("US")
 const XDR_I128_100 = "AAAACgAAAAAAAAAAAAAAAAAAAGQ="; // ScVal::I128(100)
+const XDR_MAP_AMOUNT_100 = xdrMapField("amount", XDR_I128_100);
+const XDR_MAP_CODE_US = xdrMapField("code", XDR_STRING_US);
 
 test("decodeEvent: AllowAdd", () => {
   const raw = makeRawEvent(
@@ -100,7 +122,7 @@ test("decodeEvent: DenyRemove", () => {
 test("decodeEvent: Blocked", () => {
   const raw = makeRawEvent(
     [XDR_SYMBOL_BLOCKED, XDR_ADDRESS_ACCOUNT, XDR_ADDRESS_ACCOUNT],
-    XDR_I128_100
+    XDR_MAP_AMOUNT_100
   );
   const decoded = decodeEvent(raw);
   assert.ok(decoded);
@@ -113,7 +135,7 @@ test("decodeEvent: Blocked", () => {
 test("decodeEvent: JurisdictionSet", () => {
   const raw = makeRawEvent(
     [XDR_SYMBOL_JURISDICTIONSET, XDR_ADDRESS_ACCOUNT],
-    XDR_STRING_US
+    XDR_MAP_CODE_US
   );
   const decoded = decodeEvent(raw);
   assert.ok(decoded);
