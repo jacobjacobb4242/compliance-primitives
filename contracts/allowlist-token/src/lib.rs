@@ -127,6 +127,9 @@ pub struct UpgradeState {
 /// Current on-chain schema version for this contract instance.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// Minimum upgrade review window, approximately one day at five seconds per ledger.
+pub const MIN_UPGRADE_DELAY_LEDGERS: u32 = 17_280;
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -146,6 +149,7 @@ pub enum Error {
     ExpiredSignature = 11,
     /// `commit_upgrade` called with no pending upgrade, or before `activated_at`.
     UpgradeNotReady = 12,
+    UpgradeDelayTooShort = 13,
 }
 
 #[contract]
@@ -411,6 +415,9 @@ impl AllowlistToken {
         delay_ledgers: u32,
     ) -> Result<(), Error> {
         Self::require_admin(&env, &admin)?;
+        if delay_ledgers < MIN_UPGRADE_DELAY_LEDGERS {
+            return Err(Error::UpgradeDelayTooShort);
+        }
         let state = UpgradeState {
             new_wasm,
             activated_at: u64::from(env.ledger().sequence())
