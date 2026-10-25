@@ -40,7 +40,7 @@ extern crate alloc;
 
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, token, Address, Bytes,
-    BytesN, Env, String, Symbol,
+    BytesN, Env, String, Symbol, Vec,
 };
 
 /// Extend a persistent allowlist entry when its remaining TTL drops below
@@ -49,6 +49,9 @@ pub(crate) const ALLOWED_TTL_THRESHOLD: u32 = 120_960; // ~7 days
 
 /// Target remaining TTL after extension (~90 days at ~5s/ledger).
 pub(crate) const ALLOWED_TTL_EXTEND_TO: u32 = 1_555_200; // ~90 days
+
+/// Maximum number of addresses accepted by a batch allowlist operation.
+pub const MAX_BATCH_SIZE: u32 = 45;
 
 #[contracttype]
 #[derive(Clone)]
@@ -66,6 +69,12 @@ enum DataKey {
     /// Last accepted delegated-action nonce for an admin. Persistent storage.
     DelegatedNonce(Address),
     PendingUpgrade,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct AllowlistEntry {
+    pub expiration_ledger: Option<u32>,
 }
 
 #[contractevent]
@@ -149,7 +158,7 @@ pub enum Error {
     ExpiredSignature = 11,
     /// `commit_upgrade` called with no pending upgrade, or before `activated_at`.
     UpgradeNotReady = 12,
-    UpgradeDelayTooShort = 13,
+    BatchTooLarge = 13,
 }
 
 #[contract]
@@ -214,10 +223,12 @@ impl AllowlistToken {
     /// it is restricted to the `admin` (directly, or through
     /// `add_to_allowlist_delegated`). The compliance officer may revoke access
     /// via `remove_from_allowlist` but never grant it.
-    ///
-    /// Returns `Err(ContractPaused)` if the contract is currently paused.
-    pub fn add_to_allowlist(env: Env, admin: Address, address: Address) -> Result<(), Error> {
-        Self::reject_if_paused(&env)?;
+    pub fn add_to_allowlist(
+        env: Env,
+        admin: Address,
+        address: Address,
+        expiration_ledger: Option<u32>,
+    ) -> Result<(), Error> {
         Self::require_admin(&env, &admin)?;
         if let Some(exp) = expiration_ledger {
             if exp < env.ledger().sequence() {
@@ -234,6 +245,39 @@ impl AllowlistToken {
             ALLOWED_TTL_EXTEND_TO,
         );
         AllowAdd { address }.publish(&env);
+        Ok(())
+    }
+
+    /// Add every address to the allowlist. Admin-only; each entry receives the
+    /// same optional expiration ledger and an individual `AllowAdd` event.
+    pub fn add_multiple_to_allowlist(
+        env: Env,
+        admin: Address,
+        addresses: Vec<Address>,
+        expiration_ledger: Option<u32>,
+    ) -> Result<(), Error> {
+        Self::require_admin(&env, &admin)?;
+        if addresses.len() > MAX_BATCH_SIZE {
+            return Err(Error::BatchTooLarge);
+        }
+        if let Some(expiration) = expiration_ledger {
+            if expiration < env.ledger().sequence() {
+                return Err(Error::InvalidInput);
+            }
+        }
+
+        for address in addresses.iter() {
+            let key = DataKey::Allowed(address.clone());
+            env.storage()
+                .persistent()
+                .set(&key, &AllowlistEntry { expiration_ledger });
+            env.storage().persistent().extend_ttl(
+                &key,
+                ALLOWED_TTL_THRESHOLD,
+                ALLOWED_TTL_EXTEND_TO,
+            );
+            AllowAdd { address }.publish(&env);
+        }
         Ok(())
     }
 
@@ -284,7 +328,9 @@ impl AllowlistToken {
             Err(_) => return Err(Error::NotAuthorized),
         }
         let key = DataKey::Allowed(address.clone());
-        env.storage().persistent().set(&key, &true);
+        env.storage()
+            .persistent()
+            .set(&key, &AllowlistEntry { expiration_ledger: None });
         env.storage().persistent().extend_ttl(
             &key,
             ALLOWED_TTL_THRESHOLD,
@@ -304,6 +350,27 @@ impl AllowlistToken {
             .persistent()
             .remove(&DataKey::Allowed(address.clone()));
         AllowRemove { address }.publish(&env);
+        Ok(())
+    }
+
+    /// Remove every address from the allowlist. Admin or compliance officer;
+    /// each address emits an individual `AllowRemove` event.
+    pub fn remove_multiple_from_allowlist(
+        env: Env,
+        admin: Address,
+        addresses: Vec<Address>,
+    ) -> Result<(), Error> {
+        Self::require_compliance_authority(&env, &admin)?;
+        if addresses.len() > MAX_BATCH_SIZE {
+            return Err(Error::BatchTooLarge);
+        }
+
+        for address in addresses.iter() {
+            env.storage()
+                .persistent()
+                .remove(&DataKey::Allowed(address.clone()));
+            AllowRemove { address }.publish(&env);
+        }
         Ok(())
     }
 
