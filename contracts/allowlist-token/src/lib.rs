@@ -588,6 +588,16 @@ impl AllowlistToken {
         Ok(())
     }
 
+    /// Return the pending admin proposal, if one exists.
+    pub fn get_pending_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::PendingAdmin)
+    }
+
+    /// Return the pending upgrade and activation ledger, if one exists.
+    pub fn get_pending_upgrade(env: Env) -> Option<UpgradeState> {
+        env.storage().instance().get(&DataKey::PendingUpgrade)
+    }
+
     /// Current on-chain schema version (see [`SCHEMA_VERSION`]).
     pub fn schema_version(_env: Env) -> u32 {
         SCHEMA_VERSION
