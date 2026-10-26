@@ -375,7 +375,9 @@ mod issuer_transfer {
         let (issuer, contract_id, client) = setup(&env);
         let new_issuer = Address::generate(&env);
 
+        assert_eq!(client.get_issuer(), issuer);
         client.transfer_issuer(&issuer, &new_issuer);
+        assert_eq!(client.get_issuer(), new_issuer);
 
         assert_eq!(
             env.events().all(),
@@ -456,6 +458,7 @@ mod issuer_transfer {
         let client = JurisdictionFlagClient::new(&env, &contract_id);
         let someone = Address::generate(&env);
 
+        assert_eq!(client.try_get_issuer(), Err(Ok(Error::NotInitialized)));
         assert_eq!(
             client.try_transfer_issuer(&someone, &someone),
             Err(Ok(Error::NotInitialized))
@@ -562,6 +565,37 @@ fn test_no_expiry_never_expires() {
 
     env.ledger().with_mut(|li| li.sequence_number += 1_000_000);
     assert_eq!(client.get_jurisdiction(&alice), Some(code));
+}
+
+#[test]
+fn test_set_jurisdiction_until_validates_ledger_boundary() {
+    let env = Env::default();
+    let (issuer, _contract_id, client) = setup(&env);
+    let past_address = Address::generate(&env);
+    let current_address = Address::generate(&env);
+    let future_address = Address::generate(&env);
+    let code = String::from_str(&env, "US");
+    let current_sequence = 10;
+    env.ledger()
+        .with_mut(|ledger| ledger.sequence_number = current_sequence);
+
+    assert_eq!(
+        client.try_set_jurisdiction_until(
+            &issuer,
+            &past_address,
+            &code,
+            &(current_sequence - 1),
+        ),
+        Err(Ok(Error::InvalidInput))
+    );
+    assert_eq!(client.get_jurisdiction(&past_address), None);
+
+    client.set_jurisdiction_until(&issuer, &current_address, &code, &current_sequence);
+    assert_eq!(client.get_jurisdiction(&current_address), Some(code.clone()));
+
+    let future_sequence = current_sequence + 1;
+    client.set_jurisdiction_until(&issuer, &future_address, &code, &future_sequence);
+    assert_eq!(client.get_jurisdiction(&future_address), Some(code));
 }
 
 #[test]
@@ -690,6 +724,122 @@ fn test_set_multiple_jurisdictions_compliance_officer_can_set() {
         client.get_jurisdiction(&alice),
         Some(String::from_str(&env, "US"))
     );
+}
+
+#[test]
+fn test_compliance_officer_entry_point_access_matrix() {
+    let env = Env::default();
+    let (issuer, _contract_id, client) = setup(&env);
+    let officer = Address::generate(&env);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    let code = String::from_str(&env, "US");
+    client.set_compliance_officer(&issuer, &officer);
+
+    macro_rules! check_access {
+        ($name:literal, $result:expr, $expected:expr) => {{
+            let actual = match $result {
+                Ok(Ok(())) => true,
+                Err(Ok(Error::NotAuthorized)) => false,
+                other => panic!("unexpected result for {}: {:?}", $name, other),
+            };
+            assert_eq!(actual, $expected, "{} officer access mismatch", $name);
+        }};
+    }
+
+    let officer_entry_points = [
+        ("set_jurisdiction", true),
+        ("set_jurisdiction_until", true),
+        ("add_jurisdiction", true),
+        ("set_multiple_jurisdictions", true),
+        ("remove_jurisdiction", false),
+        ("remove_jurisdiction_multiple", false),
+        ("pause", false),
+        ("unpause", false),
+        ("set_compliance_officer", false),
+        ("revoke_compliance_officer", false),
+        ("transfer_issuer", false),
+        ("propose_issuer", false),
+        ("cancel_issuer_proposal", false),
+        ("upgrade", false),
+    ];
+
+    for (entry_point, expected) in officer_entry_points {
+        match entry_point {
+            "set_jurisdiction" => check_access!(
+                entry_point,
+                client.try_set_jurisdiction(&officer, &alice, &code),
+                expected
+            ),
+            "set_jurisdiction_until" => check_access!(
+                entry_point,
+                client.try_set_jurisdiction_until(&officer, &alice, &code, &env.ledger().sequence()),
+                expected
+            ),
+            "add_jurisdiction" => check_access!(
+                entry_point,
+                client.try_add_jurisdiction(&officer, &alice, &code),
+                expected
+            ),
+            "set_multiple_jurisdictions" => {
+                let entries = vec![&env, (alice.clone(), code.clone())];
+                check_access!(
+                    entry_point,
+                    client.try_set_multiple_jurisdictions(&officer, &entries),
+                    expected
+                );
+            }
+            "remove_jurisdiction" => check_access!(
+                entry_point,
+                client.try_remove_jurisdiction(&officer, &alice, &code),
+                expected
+            ),
+            "remove_jurisdiction_multiple" => {
+                let addresses = vec![&env, alice.clone()];
+                check_access!(
+                    entry_point,
+                    client.try_remove_jurisdiction_multiple(&officer, &addresses),
+                    expected
+                );
+            }
+            "pause" => check_access!(entry_point, client.try_pause(&officer), expected),
+            "unpause" => check_access!(entry_point, client.try_unpause(&officer), expected),
+            "set_compliance_officer" => check_access!(
+                entry_point,
+                client.try_set_compliance_officer(&officer, &bob),
+                expected
+            ),
+            "revoke_compliance_officer" => check_access!(
+                entry_point,
+                client.try_revoke_compliance_officer(&officer),
+                expected
+            ),
+            "transfer_issuer" => check_access!(
+                entry_point,
+                client.try_transfer_issuer(&officer, &bob),
+                expected
+            ),
+            "propose_issuer" => check_access!(
+                entry_point,
+                client.try_propose_issuer(&officer, &bob),
+                expected
+            ),
+            "cancel_issuer_proposal" => check_access!(
+                entry_point,
+                client.try_cancel_issuer_proposal(&officer),
+                expected
+            ),
+            "upgrade" => {
+                let wasm_hash = BytesN::from_array(&env, &[0; 32]);
+                check_access!(
+                    entry_point,
+                    client.try_upgrade(&officer, &wasm_hash),
+                    expected
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
 }
 
 #[test]
@@ -955,5 +1105,69 @@ fn test_propose_issuer_overwrites_previous_proposal() {
     assert_eq!(
         client.get_jurisdiction(&alice),
         Some(String::from_str(&env, "DE"))
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #597: MAX_CODES_PER_ADDRESS cap on add_jurisdiction
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_add_jurisdiction_enforces_max_codes_per_address() {
+    let env = Env::default();
+    let (issuer, _contract_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+
+    // Fill up to the cap with distinct two-letter codes.
+    // There are 26 uppercase letters; generate MAX_CODES_PER_ADDRESS codes.
+    let all_codes = ["AA", "BB", "CC", "DD", "EE", "FF", "GG", "HH"];
+    assert_eq!(all_codes.len() as u32, super::MAX_CODES_PER_ADDRESS);
+
+    for code in all_codes.iter().take(super::MAX_CODES_PER_ADDRESS as usize - 1) {
+        client.add_jurisdiction(&issuer, &alice, &String::from_str(&env, code));
+    }
+    // The cap-th addition should succeed.
+    client.add_jurisdiction(
+        &issuer,
+        &alice,
+        &String::from_str(&env, all_codes[super::MAX_CODES_PER_ADDRESS as usize - 1]),
+    );
+    // One more must be rejected.
+    let result = client.try_add_jurisdiction(&issuer, &alice, &String::from_str(&env, "ZZ"));
+    assert_eq!(result, Err(Ok(Error::TooManyCodes)));
+}
+
+#[test]
+fn test_add_jurisdiction_duplicate_does_not_count_toward_cap() {
+    let env = Env::default();
+    let (issuer, _contract_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+
+    // Add a code, then add it again — the duplicate should not increase the count.
+    client.add_jurisdiction(&issuer, &alice, &String::from_str(&env, "US"));
+    client.add_jurisdiction(&issuer, &alice, &String::from_str(&env, "US"));
+
+    // Should have exactly one code.
+    assert_eq!(
+        client.list_jurisdictions(&alice),
+        vec![&env, String::from_str(&env, "US")]
+    );
+}
+
+#[test]
+fn test_add_jurisdiction_at_boundary_accepts_up_to_cap() {
+    let env = Env::default();
+    let (issuer, _contract_id, client) = setup(&env);
+    let alice = Address::generate(&env);
+
+    let all_codes = ["AA", "BB", "CC", "DD", "EE", "FF", "GG", "HH"];
+    for code in all_codes.iter().take(super::MAX_CODES_PER_ADDRESS as usize) {
+        client.add_jurisdiction(&issuer, &alice, &String::from_str(&env, code));
+    }
+
+    // Exactly MAX_CODES_PER_ADDRESS codes stored.
+    assert_eq!(
+        client.list_jurisdictions(&alice).len(),
+        super::MAX_CODES_PER_ADDRESS
     );
 }

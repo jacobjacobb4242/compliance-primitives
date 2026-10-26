@@ -36,7 +36,7 @@
 //! offline or in cold storage and a relayer pays the fees; use the direct
 //! path (`admin.require_auth()`) whenever the admin can sign the transaction
 //! itself.
-#![no_std]` Soroban contract that wraps an existing
+//! `allowlist-token` is a Soroban contract that wraps an existing
 //! SEP-41 token and only permits `transfer` calls between two addresses that
 //! are both present on an on-chain allowlist.
 //!
@@ -61,7 +61,7 @@ extern crate alloc;
 
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, token, Address, Bytes,
-    BytesN, Env, String, Symbol,
+    BytesN, Env, String, Symbol, Vec,
 };
 
 /// Extend a persistent allowlist entry when its remaining TTL drops below
@@ -70,6 +70,9 @@ pub(crate) const ALLOWED_TTL_THRESHOLD: u32 = 120_960; // ~7 days
 
 /// Target remaining TTL after extension (~90 days at ~5s/ledger).
 pub(crate) const ALLOWED_TTL_EXTEND_TO: u32 = 1_555_200; // ~90 days
+
+/// Maximum number of addresses accepted by a batch allowlist operation.
+pub const MAX_BATCH_SIZE: u32 = 45;
 
 #[contracttype]
 #[derive(Clone)]
@@ -87,6 +90,12 @@ enum DataKey {
     /// Last accepted delegated-action nonce for an admin. Persistent storage.
     DelegatedNonce(Address),
     PendingUpgrade,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct AllowlistEntry {
+    pub expiration_ledger: Option<u32>,
 }
 
 #[contractevent]
@@ -119,6 +128,35 @@ pub struct AdminTransferred {
 }
 
 #[contractevent]
+pub struct AdminProposed {
+    #[topic]
+    pub current: Address,
+    #[topic]
+    pub proposed: Address,
+}
+
+#[contractevent]
+pub struct UpgradeProposed {
+    #[topic]
+    pub admin: Address,
+    pub new_wasm: BytesN<32>,
+    pub activated_at: u64,
+}
+
+#[contractevent]
+pub struct UpgradeCancelled {
+    #[topic]
+    pub admin: Address,
+}
+
+#[contractevent]
+pub struct UpgradeCommitted {
+    #[topic]
+    pub admin: Address,
+    pub new_wasm: BytesN<32>,
+}
+
+#[contractevent]
 pub struct Paused {
     #[topic]
     pub admin: Address,
@@ -148,6 +186,9 @@ pub struct UpgradeState {
 /// Current on-chain schema version for this contract instance.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// Minimum upgrade review window, approximately one day at five seconds per ledger.
+pub const MIN_UPGRADE_DELAY_LEDGERS: u32 = 17_280;
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -167,6 +208,7 @@ pub enum Error {
     ExpiredSignature = 11,
     /// `commit_upgrade` called with no pending upgrade, or before `activated_at`.
     UpgradeNotReady = 12,
+    BatchTooLarge = 13,
 }
 
 #[contract]
@@ -200,6 +242,14 @@ impl AllowlistToken {
         })
     }
 
+    /// Return the configured admin address.
+    pub fn get_admin(env: Env) -> Result<Address, Error> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)
+    }
+
     /// Configure the ed25519 public key that may authorize delegated admin
     /// actions without the admin account itself needing to submit the
     /// transaction. The direct-auth path remains unchanged and still uses
@@ -223,7 +273,12 @@ impl AllowlistToken {
     /// it is restricted to the `admin` (directly, or through
     /// `add_to_allowlist_delegated`). The compliance officer may revoke access
     /// via `remove_from_allowlist` but never grant it.
-    pub fn add_to_allowlist(env: Env, admin: Address, address: Address) -> Result<(), Error> {
+    pub fn add_to_allowlist(
+        env: Env,
+        admin: Address,
+        address: Address,
+        expiration_ledger: Option<u32>,
+    ) -> Result<(), Error> {
         Self::require_admin(&env, &admin)?;
         if let Some(exp) = expiration_ledger {
             if exp < env.ledger().sequence() {
@@ -243,9 +298,44 @@ impl AllowlistToken {
         Ok(())
     }
 
+    /// Add every address to the allowlist. Admin-only; each entry receives the
+    /// same optional expiration ledger and an individual `AllowAdd` event.
+    pub fn add_multiple_to_allowlist(
+        env: Env,
+        admin: Address,
+        addresses: Vec<Address>,
+        expiration_ledger: Option<u32>,
+    ) -> Result<(), Error> {
+        Self::require_admin(&env, &admin)?;
+        if addresses.len() > MAX_BATCH_SIZE {
+            return Err(Error::BatchTooLarge);
+        }
+        if let Some(expiration) = expiration_ledger {
+            if expiration < env.ledger().sequence() {
+                return Err(Error::InvalidInput);
+            }
+        }
+
+        for address in addresses.iter() {
+            let key = DataKey::Allowed(address.clone());
+            env.storage()
+                .persistent()
+                .set(&key, &AllowlistEntry { expiration_ledger });
+            env.storage().persistent().extend_ttl(
+                &key,
+                ALLOWED_TTL_THRESHOLD,
+                ALLOWED_TTL_EXTEND_TO,
+            );
+            AllowAdd { address }.publish(&env);
+        }
+        Ok(())
+    }
+
     /// Add `address` to the allowlist using a signed off-chain authorization
     /// payload. This path verifies a nonce and expiry before applying the
     /// allowlist change, so a relayer can submit it on behalf of the admin.
+    ///
+    /// Returns `Err(ContractPaused)` if the contract is currently paused.
     pub fn add_to_allowlist_delegated(
         env: Env,
         admin: Address,
@@ -254,12 +344,10 @@ impl AllowlistToken {
         expiry: u64,
         signature: BytesN<64>,
     ) -> Result<(), Error> {
+        Self::reject_if_paused(&env)?;
         Self::require_configured_admin(&env, &admin)?;
 
         let now = env.ledger().timestamp();
-        // Strict comparison: `expiry == now` is already expired, so a zero
-        // expiry or one at the current ledger timestamp is rejected. Only
-        // `expiry > now` is accepted.
         if expiry <= now {
             return Err(Error::ExpiredSignature);
         }
@@ -289,12 +377,10 @@ impl AllowlistToken {
             Ok(_) => {}
             Err(_) => return Err(Error::NotAuthorized),
         }
-
+        let key = DataKey::Allowed(address.clone());
         env.storage()
             .persistent()
-            .set(&DataKey::DelegatedNonce(admin), &nonce);
-        let key = DataKey::Allowed(address.clone());
-        env.storage().persistent().set(&key, &true);
+            .set(&key, &AllowlistEntry { expiration_ledger: None });
         env.storage().persistent().extend_ttl(
             &key,
             ALLOWED_TTL_THRESHOLD,
@@ -305,12 +391,36 @@ impl AllowlistToken {
     }
 
     /// Remove `address` from the allowlist. Admin or compliance officer.
+    ///
+    /// Returns `Err(ContractPaused)` if the contract is currently paused.
     pub fn remove_from_allowlist(env: Env, admin: Address, address: Address) -> Result<(), Error> {
+        Self::reject_if_paused(&env)?;
         Self::require_compliance_authority(&env, &admin)?;
         env.storage()
             .persistent()
             .remove(&DataKey::Allowed(address.clone()));
         AllowRemove { address }.publish(&env);
+        Ok(())
+    }
+
+    /// Remove every address from the allowlist. Admin or compliance officer;
+    /// each address emits an individual `AllowRemove` event.
+    pub fn remove_multiple_from_allowlist(
+        env: Env,
+        admin: Address,
+        addresses: Vec<Address>,
+    ) -> Result<(), Error> {
+        Self::require_compliance_authority(&env, &admin)?;
+        if addresses.len() > MAX_BATCH_SIZE {
+            return Err(Error::BatchTooLarge);
+        }
+
+        for address in addresses.iter() {
+            env.storage()
+                .persistent()
+                .remove(&DataKey::Allowed(address.clone()));
+            AllowRemove { address }.publish(&env);
+        }
         Ok(())
     }
 
@@ -351,6 +461,11 @@ impl AllowlistToken {
         env.storage()
             .instance()
             .set(&DataKey::PendingAdmin, &new_admin);
+        AdminProposed {
+            current: current_admin,
+            proposed: new_admin,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -422,14 +537,21 @@ impl AllowlistToken {
         delay_ledgers: u32,
     ) -> Result<(), Error> {
         Self::require_admin(&env, &admin)?;
+        if delay_ledgers < MIN_UPGRADE_DELAY_LEDGERS {
+            return Err(Error::UpgradeDelayTooShort);
+        }
         let state = UpgradeState {
-            new_wasm,
+            new_wasm: new_wasm.clone(),
             activated_at: u64::from(env.ledger().sequence())
                 .saturating_add(delay_ledgers as u64),
         };
         env.storage().instance().set(&DataKey::PendingUpgrade, &state);
-        env.events()
-            .publish((soroban_sdk::symbol_short!("upgprop"),), (admin, delay_ledgers));
+        UpgradeProposed {
+            admin,
+            new_wasm,
+            activated_at: state.activated_at,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -447,10 +569,14 @@ impl AllowlistToken {
         if u64::from(env.ledger().sequence()) < state.activated_at {
             return Err(Error::UpgradeNotReady);
         }
-        env.deployer().update_current_contract_wasm(state.new_wasm);
+        env.deployer()
+            .update_current_contract_wasm(state.new_wasm.clone());
         env.storage().instance().remove(&DataKey::PendingUpgrade);
-        env.events()
-            .publish((soroban_sdk::symbol_short!("upgcommit"),), (admin,));
+        UpgradeCommitted {
+            admin,
+            new_wasm: state.new_wasm,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -458,7 +584,18 @@ impl AllowlistToken {
     pub fn cancel_upgrade(env: Env, admin: Address) -> Result<(), Error> {
         Self::require_admin(&env, &admin)?;
         env.storage().instance().remove(&DataKey::PendingUpgrade);
+        UpgradeCancelled { admin }.publish(&env);
         Ok(())
+    }
+
+    /// Return the pending admin proposal, if one exists.
+    pub fn get_pending_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::PendingAdmin)
+    }
+
+    /// Return the pending upgrade and activation ledger, if one exists.
+    pub fn get_pending_upgrade(env: Env) -> Option<UpgradeState> {
+        env.storage().instance().get(&DataKey::PendingUpgrade)
     }
 
     /// Current on-chain schema version (see [`SCHEMA_VERSION`]).
@@ -468,11 +605,9 @@ impl AllowlistToken {
 
     /// Returns true if `address` is currently allowlisted.
     ///
-    /// An entry whose `expiration_ledger` has passed (current ledger sequence
-    /// is greater than it) is treated as not allowlisted, even though it has
-    /// not been explicitly removed.
-    ///
-    /// Not affected by pause state — reads always succeed.
+    /// Not affected by pause state — reads always succeed. This view does not
+    /// extend the entry's TTL; transfer checks refresh existing entries when
+    /// their remaining TTL falls below the configured threshold.
     pub fn is_allowed(env: Env, address: Address) -> bool {
         let entry: Option<AllowlistEntry> =
             env.storage().persistent().get(&DataKey::Allowed(address));
@@ -508,6 +643,19 @@ impl AllowlistToken {
     }
 
     /// Pause all mutating operations. Admin-only.
+    ///
+    /// While paused:
+    /// - `transfer` returns `Err(ContractPaused)`.
+    /// - `add_to_allowlist`, `add_to_allowlist_delegated`, and
+    ///   `remove_from_allowlist` return `Err(ContractPaused)`.
+    ///
+    /// The following are deliberately **not** blocked by pause so that an
+    /// operator can always recover from an incident:
+    /// - `unpause` — to resume normal operation.
+    /// - `propose_admin` / `accept_admin` / `transfer_admin` — to rotate a
+    ///   compromised key.
+    /// - `set_compliance_officer` / `revoke_compliance_officer`.
+    /// - Read-only functions (`is_allowed`, `is_paused`, `metadata`, …).
     pub fn pause(env: Env, admin: Address) -> Result<(), Error> {
         Self::require_admin(&env, &admin)?;
         env.storage().instance().set(&DataKey::Paused, &true);
@@ -540,7 +688,9 @@ impl AllowlistToken {
     /// Transfer `amount` of the underlying token from `from` to `to`.
     ///
     /// Returns `Ok(false)` without forwarding if either party is not
-    /// allowlisted, emitting a `Blocked` event for auditability.
+    /// allowlisted, emitting a `Blocked` event for auditability. Checking an
+    /// existing allowlist entry extends its TTL when it falls below the
+    /// configured threshold.
     pub fn transfer(env: Env, from: Address, to: Address, amount: i128) -> Result<bool, Error> {
         if amount < 0 {
             return Err(Error::InvalidInput);
@@ -552,9 +702,9 @@ impl AllowlistToken {
 
         from.require_auth();
 
-        if !Self::is_allowed(env.clone(), from.clone())
-            || !Self::is_allowed(env.clone(), to.clone())
-        {
+        let from_allowed = Self::is_allowed_and_extend_ttl(&env, from.clone());
+        let to_allowed = Self::is_allowed_and_extend_ttl(&env, to.clone());
+        if !from_allowed || !to_allowed {
             Blocked { from, to, amount }.publish(&env);
             return Ok(false);
         }
@@ -590,27 +740,29 @@ impl AllowlistToken {
         Ok(())
     }
 
-    /// Checks that `caller` is either the admin or the compliance officer.
-    fn require_compliance_authority(env: &Env, caller: &Address) -> Result<(), Error> {
-        caller.require_auth();
-        let stored_admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .ok_or(Error::NotInitialized)?;
-        if stored_admin == *caller {
-            return Ok(());
-        }
-        if let Some(officer) = env
-            .storage()
-            .instance()
-            .get::<DataKey, Address>(&DataKey::ComplianceOfficer)
-        {
-            if officer == *caller {
-                return Ok(());
-            }
+    fn is_allowed_and_extend_ttl(env: &Env, address: Address) -> bool {
+        let key = DataKey::Allowed(address);
+        let allowed = env.storage().persistent().get(&key).unwrap_or(false);
+        if allowed {
+            env.storage().persistent().extend_ttl(
+                &key,
+                ALLOWED_TTL_THRESHOLD,
+                ALLOWED_TTL_EXTEND_TO,
+            );
         }
         Err(Error::NotAuthorized)
+    }
+
+    fn reject_if_paused(env: &Env) -> Result<(), Error> {
+        if env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+        {
+            return Err(Error::ContractPaused);
+        }
+        Ok(())
     }
 
     /// Message signed by the delegated admin key:

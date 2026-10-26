@@ -5,6 +5,7 @@ An issuer-controlled mapping from addresses to jurisdiction codes.
 | Method | Purpose |
 | --- | --- |
 | `initialize(issuer)` | Configure the issuer. |
+| `get_issuer() -> Address` | Read the configured issuer. |
 | `set_jurisdiction(issuer, address, code)` | Set or replace an address jurisdiction. |
 | `set_jurisdiction_until(issuer, address, code, valid_until)` | Set or replace a jurisdiction with an inclusive ledger expiry. |
 | `add_jurisdiction(issuer, address, code)` | Add a jurisdiction code without replacing existing codes. |

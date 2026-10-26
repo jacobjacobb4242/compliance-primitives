@@ -66,6 +66,9 @@ use soroban_sdk::{
 /// within Soroban's default per-invocation write-entry budget of ~50.
 const MAX_BATCH_SIZE: u32 = 45;
 
+/// Minimum upgrade review window, approximately one day at five seconds per ledger.
+pub const MIN_UPGRADE_DELAY_LEDGERS: u32 = 17_280;
+
 // ---------------------------------------------------------------------------
 // Storage
 // ---------------------------------------------------------------------------
@@ -185,6 +188,41 @@ pub struct AdminTransferred {
 }
 
 #[contractevent]
+pub struct AdminProposed {
+    #[topic]
+    pub current: Address,
+    #[topic]
+    pub proposed: Address,
+}
+
+#[contractevent]
+pub struct AdminProposalCancelled {
+    #[topic]
+    pub current: Address,
+}
+
+#[contractevent]
+pub struct UpgradeProposed {
+    #[topic]
+    pub admin: Address,
+    pub new_wasm: BytesN<32>,
+    pub activated_at: u64,
+}
+
+#[contractevent]
+pub struct UpgradeCancelled {
+    #[topic]
+    pub admin: Address,
+}
+
+#[contractevent]
+pub struct UpgradeCommitted {
+    #[topic]
+    pub admin: Address,
+    pub new_wasm: BytesN<32>,
+}
+
+#[contractevent]
 pub struct Paused {
     #[topic]
     pub admin: Address,
@@ -236,6 +274,7 @@ pub enum Error {
     MultisigNotEnabled = 12,
     NoPendingAdmin = 13,
     PendingAdminMismatch = 14,
+    UpgradeDelayTooShort = 15,
 }
 
 // ---------------------------------------------------------------------------
@@ -257,6 +296,14 @@ impl DenylistGate {
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Paused, &false);
         Ok(())
+    }
+
+    /// Return the configured admin address.
+    pub fn get_admin(env: Env) -> Result<Address, Error> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)
     }
 
     /// Assign the compliance-officer role. Admin-only.
@@ -309,6 +356,11 @@ impl DenylistGate {
     pub fn propose_admin(env: Env, current_admin: Address, new_admin: Address) -> Result<(), Error> {
         Self::require_admin(&env, &current_admin)?;
         env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
+        AdminProposed {
+            current: current_admin,
+            proposed: new_admin,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -341,6 +393,10 @@ impl DenylistGate {
             return Err(Error::NoPendingAdmin);
         }
         env.storage().instance().remove(&DataKey::PendingAdmin);
+        AdminProposalCancelled {
+            current: current_admin,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -401,14 +457,21 @@ impl DenylistGate {
         delay_ledgers: u32,
     ) -> Result<(), Error> {
         Self::require_admin(&env, &admin)?;
+        if delay_ledgers < MIN_UPGRADE_DELAY_LEDGERS {
+            return Err(Error::UpgradeDelayTooShort);
+        }
         let state = UpgradeState {
-            new_wasm,
+            new_wasm: new_wasm.clone(),
             activated_at: u64::from(env.ledger().sequence())
                 .saturating_add(delay_ledgers as u64),
         };
         env.storage().instance().set(&DataKey::PendingUpgrade, &state);
-        env.events()
-            .publish((soroban_sdk::symbol_short!("upgprop"),), (admin, delay_ledgers));
+        UpgradeProposed {
+            admin,
+            new_wasm,
+            activated_at: state.activated_at,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -426,10 +489,14 @@ impl DenylistGate {
         if u64::from(env.ledger().sequence()) < state.activated_at {
             return Err(Error::UpgradeNotReady);
         }
-        env.deployer().update_current_contract_wasm(state.new_wasm);
+        env.deployer()
+            .update_current_contract_wasm(state.new_wasm.clone());
         env.storage().instance().remove(&DataKey::PendingUpgrade);
-        env.events()
-            .publish((soroban_sdk::symbol_short!("upgcommit"),), (admin,));
+        UpgradeCommitted {
+            admin,
+            new_wasm: state.new_wasm,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -437,7 +504,18 @@ impl DenylistGate {
     pub fn cancel_upgrade(env: Env, admin: Address) -> Result<(), Error> {
         Self::require_admin(&env, &admin)?;
         env.storage().instance().remove(&DataKey::PendingUpgrade);
+        UpgradeCancelled { admin }.publish(&env);
         Ok(())
+    }
+
+    /// Return the pending admin proposal, if one exists.
+    pub fn get_pending_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::PendingAdmin)
+    }
+
+    /// Return the pending upgrade and activation ledger, if one exists.
+    pub fn get_pending_upgrade(env: Env) -> Option<UpgradeState> {
+        env.storage().instance().get(&DataKey::PendingUpgrade)
     }
 
     /// Current on-chain schema version (see [`SCHEMA_VERSION`]).

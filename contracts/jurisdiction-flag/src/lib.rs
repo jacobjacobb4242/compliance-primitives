@@ -22,8 +22,8 @@
 //!
 //! **Callers**: the configured issuer or compliance officer may call
 //! `set_jurisdiction`, `set_jurisdiction_until`, `add_jurisdiction`, and
-//! `set_multiple_jurisdictions`; only the issuer may call removal, pause, and
-//! timelocked upgrade operations.
+//! `set_multiple_jurisdictions`; only the issuer may call
+//! `remove_jurisdiction`, `remove_jurisdiction_multiple`, or `upgrade`.
 //! `set_jurisdiction` / `get_jurisdiction` remain single-code conveniences.
 //! Use `add_jurisdiction`, `remove_jurisdiction`, and `list_jurisdictions`
 //! for the multi-code model. Any contract or off-chain client can read codes
@@ -38,18 +38,27 @@ use soroban_sdk::{
 /// Length in bytes of an ISO 3166-1 alpha-2 code.
 const JURISDICTION_CODE_LEN: u32 = 2;
 
-/// Extend persistent jurisdiction entries when TTL drops below this many ledgers.
-const TTL_THRESHOLD: u32 = 1_000;
-/// Target TTL (in ledgers) after extension.
-const TTL_EXTEND_TO: u32 = 5_000;
+/// Extend persistent jurisdiction entries below 120,960 ledgers (~7 days).
+const TTL_THRESHOLD: u32 = 120_960;
+/// Target 1,555,200 ledgers (~90 days) after extension.
+const TTL_EXTEND_TO: u32 = 1_555_200;
 
 /// Maximum number of entries accepted by `set_multiple_jurisdictions` in a
 /// single call. Keeps transaction costs bounded and prevents resource
 /// exhaustion.
 pub const MAX_BATCH_SIZE: u32 = 100;
 
-/// Minimum delay for a WASM upgrade proposal (~1 day at 5 seconds per ledger).
-pub const MIN_UPGRADE_DELAY_LEDGERS: u32 = 17_280;
+/// Maximum number of jurisdiction codes that can be attached to a single
+/// address. Enforced in `add_jurisdiction` to prevent a compromised or buggy
+/// officer key from attaching so many codes that every later
+/// `is_permitted_jurisdiction` call (which does `allowed_codes × codes`
+/// comparisons) exceeds the CPU budget inside a consumer's transfer.
+///
+/// The value 8 is chosen to be well within the Soroban per-invocation CPU
+/// budget for all realistic `allowed_codes` list sizes, while covering any
+/// legitimate multi-jurisdiction use case (an address is rarely subject to
+/// more than a handful of applicable codes).
+pub const MAX_CODES_PER_ADDRESS: u32 = 8;
 
 #[contracttype]
 #[derive(Clone)]
@@ -156,10 +165,9 @@ pub enum Error {
     /// The address calling `accept_issuer` does not match the pending issuer
     /// stored by `propose_issuer`.
     PendingIssuerMismatch = 9,
-    /// Upgrade delay is shorter than [`MIN_UPGRADE_DELAY_LEDGERS`].
-    UpgradeDelayTooShort = 10,
-    /// No upgrade is pending, or its timelock has not elapsed.
-    UpgradeNotReady = 11,
+    /// `add_jurisdiction` was called when the address already has
+    /// [`MAX_CODES_PER_ADDRESS`] codes attached.
+    TooManyCodes = 10,
 }
 
 #[contract]
@@ -189,6 +197,14 @@ impl JurisdictionFlag {
         env.storage().instance().set(&DataKey::Issuer, &issuer);
         env.storage().instance().set(&DataKey::Paused, &false);
         Ok(())
+    }
+
+    /// Return the configured issuer address.
+    pub fn get_issuer(env: Env) -> Result<Address, Error> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Issuer)
+            .ok_or(Error::NotInitialized)
     }
 
     /// Reassign the issuer role to `new_issuer`. Requires auth from
@@ -275,21 +291,25 @@ impl JurisdictionFlag {
 
     /// Assign the compliance-officer role. Issuer-only.
     ///
-    /// The officer role grants access to exactly one entry point:
-    /// [`set_jurisdiction`](Self::set_jurisdiction), which is guarded by
-    /// `require_compliance_authority` (issuer *or* officer). Every other
-    /// mutating entry point is guarded by `require_issuer` and therefore
-    /// remains issuer-only, including:
+    /// The officer role grants access to exactly these entry points, each
+    /// guarded by `require_compliance_authority` (issuer *or* officer):
     ///
-    /// - [`remove_jurisdiction_multiple`](Self::remove_jurisdiction_multiple)
+    /// - [`set_jurisdiction`](Self::set_jurisdiction)
+    /// - [`set_jurisdiction_until`](Self::set_jurisdiction_until)
+    /// - [`add_jurisdiction`](Self::add_jurisdiction)
+    /// - [`set_multiple_jurisdictions`](Self::set_multiple_jurisdictions)
+    ///
+    /// All other mutating entry points remain issuer-only, including:
+    ///
+    /// - [`remove_jurisdiction`](Self::remove_jurisdiction) and
+    ///   [`remove_jurisdiction_multiple`](Self::remove_jurisdiction_multiple)
     /// - [`pause`](Self::pause) / [`unpause`](Self::unpause)
     /// - [`upgrade`](Self::upgrade)
     /// - [`set_compliance_officer`](Self::set_compliance_officer) /
     ///   [`revoke_compliance_officer`](Self::revoke_compliance_officer)
     ///
-    /// There are no `_until` or multiple-address variants of
-    /// `set_jurisdiction`; the officer role does not extend to any other
-    /// function.
+    /// The officer role does not extend to removal, pause, upgrade, or
+    /// issuer/officer management functions.
     ///
     /// Auth: gated by [`require_issuer`] — only the issuer may delegate this role.
     pub fn set_compliance_officer(
@@ -306,11 +326,14 @@ impl JurisdictionFlag {
 
     /// Revoke the compliance-officer role. Issuer-only.
     ///
-    /// After revocation, the officer no longer satisfies
-    /// `require_compliance_authority`, so the only entry point it previously
-    /// unlocked — [`set_jurisdiction`](Self::set_jurisdiction) — reverts to
-    /// issuer-only access. All other mutating entry points
-    /// ([`remove_jurisdiction_multiple`](Self::remove_jurisdiction_multiple),
+    /// After revocation, the former officer no longer satisfies
+    /// `require_compliance_authority`, so [`set_jurisdiction`](Self::set_jurisdiction),
+    /// [`set_jurisdiction_until`](Self::set_jurisdiction_until),
+    /// [`add_jurisdiction`](Self::add_jurisdiction), and
+    /// [`set_multiple_jurisdictions`](Self::set_multiple_jurisdictions) revert
+    /// to issuer-only access. All other mutating entry points
+    /// ([`remove_jurisdiction`](Self::remove_jurisdiction),
+    /// [`remove_jurisdiction_multiple`](Self::remove_jurisdiction_multiple),
     /// [`pause`](Self::pause), [`unpause`](Self::unpause),
     /// [`upgrade`](Self::upgrade)) were already issuer-only via
     /// `require_issuer` and are unaffected.
@@ -365,6 +388,7 @@ impl JurisdictionFlag {
         code: String,
     ) -> Result<(), Error> {
         Self::require_compliance_authority(&env, &issuer)?;
+        Self::reject_if_paused(&env)?;
         Self::validate_jurisdiction_code(&code)?;
 
         let mut codes = Vec::new(&env);
@@ -401,14 +425,7 @@ impl JurisdictionFlag {
         entries: Vec<(Address, String)>,
     ) -> Result<(), Error> {
         Self::require_compliance_authority(&env, &caller)?;
-        let paused: bool = env
-            .storage()
-            .instance()
-            .get(&DataKey::Paused)
-            .unwrap_or(false);
-        if paused {
-            return Err(Error::ContractPaused);
-        }
+        Self::reject_if_paused(&env)?;
 
         if entries.is_empty() || entries.len() > MAX_BATCH_SIZE {
             return Err(Error::InvalidInput);
@@ -443,7 +460,11 @@ impl JurisdictionFlag {
         valid_until: u32,
     ) -> Result<(), Error> {
         Self::require_compliance_authority(&env, &issuer)?;
+        Self::reject_if_paused(&env)?;
         Self::validate_jurisdiction_code(&code)?;
+        if valid_until < env.ledger().sequence() {
+            return Err(Error::InvalidInput);
+        }
 
         let mut codes = Vec::new(&env);
         codes.push_back(code.clone());
@@ -458,6 +479,11 @@ impl JurisdictionFlag {
 
     /// Add `code` to `address`'s jurisdiction codes if it is not already present.
     /// Issuer or compliance-officer only.
+    ///
+    /// # Errors
+    /// - [`Error::TooManyCodes`] if the address already has
+    ///   [`MAX_CODES_PER_ADDRESS`] codes attached. Remove a code first, or use
+    ///   [`set_jurisdiction`](Self::set_jurisdiction) to replace all codes at once.
     pub fn add_jurisdiction(
         env: Env,
         issuer: Address,
@@ -465,10 +491,14 @@ impl JurisdictionFlag {
         code: String,
     ) -> Result<(), Error> {
         Self::require_compliance_authority(&env, &issuer)?;
+        Self::reject_if_paused(&env)?;
         Self::validate_jurisdiction_code(&code)?;
 
         let mut codes = Self::load_jurisdictions(&env, &address);
         if !codes.iter().any(|existing| existing == code) {
+            if codes.len() >= MAX_CODES_PER_ADDRESS {
+                return Err(Error::TooManyCodes);
+            }
             codes.push_back(code.clone());
             Self::store_jurisdictions(&env, &address, &codes);
         }
@@ -485,6 +515,7 @@ impl JurisdictionFlag {
         code: String,
     ) -> Result<(), Error> {
         Self::require_issuer(&env, &issuer)?;
+        Self::reject_if_paused(&env)?;
 
         let mut remaining = Vec::new(&env);
         for existing in Self::load_jurisdictions(&env, &address).iter() {
@@ -513,6 +544,7 @@ impl JurisdictionFlag {
         addresses: Vec<Address>,
     ) -> Result<(), Error> {
         Self::require_issuer(&env, &issuer)?;
+        Self::reject_if_paused(&env)?;
         for address in addresses.iter() {
             Self::store_jurisdictions(&env, &address, &Vec::new(&env));
             JurisdictionRemoved { address }.publish(&env);
@@ -583,54 +615,25 @@ impl JurisdictionFlag {
     // Private helpers
     // -----------------------------------------------------------------------
 
-    /// Propose a WASM upgrade that can be committed after the minimum delay.
-    /// Issuer-only. `new_wasm_hash` must identify previously uploaded contract
-    /// Wasm, and `delay_ledgers` must be at least
-    /// [`MIN_UPGRADE_DELAY_LEDGERS`]. A new proposal replaces any existing one.
-    pub fn propose_upgrade(
-        env: Env,
-        issuer: Address,
-        new_wasm_hash: BytesN<32>,
-        delay_ledgers: u32,
-    ) -> Result<(), Error> {
-        Self::require_issuer(&env, &issuer)?;
-        if delay_ledgers < MIN_UPGRADE_DELAY_LEDGERS {
-            return Err(Error::UpgradeDelayTooShort);
-        }
-        let state = UpgradeState {
-            new_wasm: new_wasm_hash,
-            activated_at: u64::from(env.ledger().sequence())
-                .saturating_add(u64::from(delay_ledgers)),
-        };
-        env.storage().instance().set(&DataKey::PendingUpgrade, &state);
-        env.events().publish(
-            (soroban_sdk::symbol_short!("upgprop"),),
-            (issuer, delay_ledgers),
-        );
-        Ok(())
-    }
-
-    /// Commit a previously proposed upgrade once its delay has elapsed.
-    /// Issuer-only.
-    pub fn commit_upgrade(env: Env, issuer: Address) -> Result<(), Error> {
-        Self::require_issuer(&env, &issuer)?;
-        let state: UpgradeState = env
+    fn reject_if_paused(env: &Env) -> Result<(), Error> {
+        if env
             .storage()
             .instance()
-            .get(&DataKey::PendingUpgrade)
-            .ok_or(Error::UpgradeNotReady)?;
-        if u64::from(env.ledger().sequence()) < state.activated_at {
-            return Err(Error::UpgradeNotReady);
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+        {
+            return Err(Error::ContractPaused);
         }
-        env.deployer().update_current_contract_wasm(state.new_wasm);
-        env.storage().instance().remove(&DataKey::PendingUpgrade);
-        env.events()
-            .publish((soroban_sdk::symbol_short!("upgcommit"),), (issuer,));
         Ok(())
     }
 
-    /// Cancel a pending upgrade proposal. Issuer-only.
-    pub fn cancel_upgrade(env: Env, issuer: Address) -> Result<(), Error> {
+    /// Upgrade the contract WASM. Issuer-only.
+    ///
+    /// Uses Soroban's native `update_current_contract_wasm` host function to
+    /// swap the contract code behind the same contract ID. All existing
+    /// storage (issuer address, jurisdiction flags) is preserved across the
+    /// upgrade. The issuer's auth is verified before the upgrade proceeds.
+    pub fn upgrade(env: Env, issuer: Address, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
         Self::require_issuer(&env, &issuer)?;
         env.storage().instance().remove(&DataKey::PendingUpgrade);
         Ok(())
@@ -675,9 +678,9 @@ impl JurisdictionFlag {
     ///
     /// ## Authorization split
     ///
-    /// This helper enforces a *delegated* authorization level intended for
-    /// routine compliance data operations (currently: [`set_jurisdiction`]).
-    /// The issuer can optionally appoint a compliance officer via
+    /// This helper enforces a *delegated* authorization level for
+    /// [`set_jurisdiction`], [`set_jurisdiction_until`], [`add_jurisdiction`],
+    /// and [`set_multiple_jurisdictions`]. The issuer can optionally appoint a compliance officer via
     /// [`set_compliance_officer`]; once appointed, that officer may call any
     /// entry point gated by this helper without requiring the issuer key for
     /// every individual flag operation.

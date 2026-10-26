@@ -34,24 +34,61 @@ const ADDR_AA = "GCVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVKVH7N";
 const ADDR_BB = "GC53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53XO53XUGE";
 const ADDR_CC = "GDGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMYPI2";
 
+function u32(value: number): Uint8Array {
+  const bytes = new Uint8Array(4);
+  new DataView(bytes.buffer).setUint32(0, value);
+  return bytes;
+}
+
+function concat(...parts: Uint8Array[]): Uint8Array {
+  const bytes = new Uint8Array(parts.reduce((length, part) => length + part.length, 0));
+  let offset = 0;
+  for (const part of parts) {
+    bytes.set(part, offset);
+    offset += part.length;
+  }
+  return bytes;
+}
+
+function symbol(name: string): Uint8Array {
+  const value = new TextEncoder().encode(name);
+  const padding = new Uint8Array((4 - (value.length % 4)) % 4);
+  return concat(u32(15), u32(value.length), value, padding);
+}
+
+function map(entries: [string, string][]): string {
+  return Buffer.from(concat(
+    u32(17),
+    u32(1),
+    u32(entries.length),
+    ...entries.flatMap(([key, value]) => [
+      symbol(key),
+      Buffer.from(value, "base64"),
+    ])
+  )).toString("base64");
+}
+
 // compliance-aggregator — AdminSet
-const ADMIN_SET_T0   = "AAAADwAAAAhBZG1pblNldA==";
+const ADMIN_SET_T0   = Buffer.from(symbol("admin_set")).toString("base64");
 const ADMIN_SET_T1   = "AAAAEgAAAAAAAAAAqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqo=";
-const ADMIN_SET_DATA = "AAAAAQ=="; // Void
+const ADMIN_SET_DATA = "AAAAEQAAAAEAAAAA"; // empty struct map
 
 // compliance-aggregator — DenylistGateSet
-const DENYLIST_GATE_SET_T0 = "AAAADwAAAA9EZW55bGlzdEdhdGVTZXQA";
+const DENYLIST_GATE_SET_T0 = Buffer.from(symbol("denylist_gate_set")).toString("base64");
 const DENYLIST_GATE_SET_T1 = "AAAAEgAAAAAAAAAAu7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7s=";
 
 // compliance-aggregator — JurisdictionFlagSet
-const JURIS_FLAG_SET_T0 = "AAAADwAAABNKdXJpc2RpY3Rpb25GbGFnU2V0AA==";
+const JURIS_FLAG_SET_T0 = Buffer.from(symbol("jurisdiction_flag_set")).toString("base64");
 const JURIS_FLAG_SET_T1 = "AAAAEgAAAAAAAAAAzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMw=";
 
 // policy-engine — PolicyResult
-const POLICY_RESULT_T0        = "AAAADwAAAAxQb2xpY3lSZXN1bHQ=";
+const POLICY_RESULT_T0        = Buffer.from(symbol("policy_result")).toString("base64");
 const POLICY_RESULT_T1_PASS   = "AAAAAAAAAAE="; // Bool(true)
 const POLICY_RESULT_T1_FAIL   = "AAAAAAAAAAA="; // Bool(false)
-const POLICY_RESULT_DATA      = "AAAAEAAAAAEAAAACAAAAEgAAAAAAAAAAqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqoAAAASAAAAAAAAAAC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7uw==";
+const POLICY_RESULT_DATA      = map([
+  ["from", ADMIN_SET_T1],
+  ["to", DENYLIST_GATE_SET_T1],
+]);
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 

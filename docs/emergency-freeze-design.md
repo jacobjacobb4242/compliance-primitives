@@ -16,7 +16,13 @@ Composed consumers should check the breaker first, before any per-contract compl
 
 ## Who can trigger freeze
 
-The initial design uses a single admin key, because it is the smallest and most straightforward operational model. That said, a single admin key is a single point of failure and should be treated as a deployment-time risk. A multisig or threshold key would be safer for production, and the same contract interface can be adapted later to require a multisig approval flow rather than a single signature.
+Trust is asymmetric, matching fail-closed incident-response convention: halting is cheap and should be fast, while resuming is deliberate and should be hard.
+
+- **Freeze** is callable by the admin **or any guardian**. A guardian is an address in a freeze-only set that the admin manages via `add_guardian(admin, guardian)` and `remove_guardian(admin, guardian)`. `is_guardian(address)` reads membership. Guardians can freeze but cannot unfreeze, change guardians, or rotate the admin.
+- **Unfreeze** is **admin-only**. A guardian that froze the system cannot reopen it, so a compromised or mistaken guardian can stop flows but cannot restore them on its own.
+- Guardian and admin authorization both go through `require_auth()`, so a guardian freeze is an ordinary signed transaction from that guardian's key.
+
+This means the admin key is no longer the only key that can react during an incident: if it is unavailable, any guardian can still halt the breaker. The admin still controls the guardian set, so guardian keys should be issued and revoked with the same care as the admin key itself. A multisig or threshold admin remains the recommended production setup; the guardian set complements it rather than replacing it.
 
 ## How quickly a consumer checks it
 
